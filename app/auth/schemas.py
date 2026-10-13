@@ -5,7 +5,14 @@ from pydantic import BaseModel, EmailStr, Field, StringConstraints
 
 from app.users.schemas import Password, UserResponse
 
-Code = Annotated[str, StringConstraints(pattern=r"^\d{6}$")]
+# A 6-digit code (email or authenticator app) or a recovery code like k7m2-q9xa.
+Code = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True, pattern=r"^(?:\d{6}|[A-Za-z0-9]{4}-?[A-Za-z0-9]{4})$"
+    ),
+]
+SixDigits = Annotated[str, StringConstraints(strip_whitespace=True, pattern=r"^\d{6}$")]
 
 
 class Token(BaseModel):
@@ -37,6 +44,9 @@ class ChallengeResponse(BaseModel):
     status: Literal["two_factor_required"] = "two_factor_required"
     challenge_id: str
     purpose: Literal["login", "setup"]
+    # "email": we sent a code. "totp": use the authenticator app (or a
+    # recovery code); /2fa/resend switches to an emailed code instead.
+    method: Literal["email", "totp"]
     email_hint: str
     expires_in: int
     resend_in: int
@@ -79,3 +89,24 @@ class ResetPasswordRequest(BaseModel):
 
 class MessageResponse(BaseModel):
     message: str
+
+
+class TotpSetupResponse(BaseModel):
+    secret: str
+    otpauth_uri: str
+    # Ready-to-render QR code (SVG markup) for the otpauth URI
+    qr_svg: str
+
+
+class CodeRequest(BaseModel):
+    code: SixDigits
+
+
+class RecoveryCodesResponse(BaseModel):
+    recovery_codes: list[str]
+
+
+class TwoFactorStatus(BaseModel):
+    method: Literal["email", "totp"] | None
+    totp_enabled: bool
+    recovery_codes_remaining: int

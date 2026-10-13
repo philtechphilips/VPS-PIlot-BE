@@ -34,6 +34,17 @@ class User(Base):
     two_factor_enabled: Mapped[bool] = mapped_column(server_default=true())
     # Set when the owner proves they can read the address (first 2FA code).
     email_verified_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    # Authenticator app (TOTP). The secret is encrypted at rest; it only takes
+    # effect once confirmed with a code (totp_enabled_at). totp_last_step
+    # blocks replaying a code inside its 30-second window.
+    totp_secret: Mapped[str | None] = mapped_column(String(255))
+    totp_enabled_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    totp_last_step: Mapped[int | None]
+    # Set when the owner finishes the setup wizard; until then the dashboard
+    # sends them back to it.
+    onboarding_completed_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True)
+    )
     # Login throttling
     failed_login_attempts: Mapped[int] = mapped_column(server_default="0")
     locked_until: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
@@ -44,3 +55,17 @@ class User(Base):
     @property
     def email_verified(self) -> bool:
         return self.email_verified_at is not None
+
+    @property
+    def totp_enabled(self) -> bool:
+        return self.totp_enabled_at is not None
+
+    @property
+    def two_factor_method(self) -> str | None:
+        if not self.two_factor_enabled:
+            return None
+        return "totp" if self.totp_enabled else "email"
+
+    @property
+    def onboarding_completed(self) -> bool:
+        return self.onboarding_completed_at is not None

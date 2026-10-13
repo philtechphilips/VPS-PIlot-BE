@@ -36,8 +36,10 @@ class TwoFactorChallenge(Base):
     )
     # "login" or "setup"
     purpose: Mapped[str] = mapped_column(String(20))
-    # HMAC of the 6-digit code; the code itself is never stored
-    code_hash: Mapped[str] = mapped_column(String(64))
+    # "email" (a code we sent) or "totp" (the user's authenticator app)
+    method: Mapped[str] = mapped_column(String(10), server_default="email")
+    # HMAC of the emailed code; the code itself is never stored. Empty for TOTP.
+    code_hash: Mapped[str | None] = mapped_column(String(64))
     attempts: Mapped[int] = mapped_column(server_default="0")
     expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
     last_sent_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
@@ -66,6 +68,23 @@ class AuthSession(Base):
     last_used_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now()
     )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now()
+    )
+
+
+class RecoveryCode(Base):
+    """Single-use backup codes for when the authenticator app is unavailable."""
+
+    __tablename__ = "recovery_codes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    # sha256 of the normalised code
+    code_hash: Mapped[str] = mapped_column(String(64))
+    used_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now()
     )

@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
@@ -22,7 +22,10 @@ class UserResponse(BaseModel):
     name: str | None
     role: Role
     two_factor_enabled: bool
+    two_factor_method: Literal["email", "totp"] | None
+    totp_enabled: bool
     email_verified: bool
+    onboarding_completed: bool
     created_at: datetime
 
 

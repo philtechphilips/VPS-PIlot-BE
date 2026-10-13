@@ -7,17 +7,29 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy.orm import Session
 
 from app.auth import emails
-from app.auth.models import AuthSession, PasswordResetToken, TwoFactorChallenge
+from app.auth.models import (
+    AuthSession,
+    PasswordResetToken,
+    RecoveryCode,
+    TwoFactorChallenge,
+)
 from app.core import crud
 from app.core.config import settings
 from app.core.security import (
+    decrypt_secret,
+    encrypt_secret,
     generate_otp,
+    generate_recovery_codes,
     generate_token,
+    generate_totp_secret,
     hash_otp,
     hash_password,
     hash_token,
+    match_totp,
     new_id,
+    normalize_recovery_code,
     otp_matches,
+    totp_uri,
     verify_password,
 )
 from app.users import service as users_service
@@ -153,15 +165,18 @@ class IssuedChallenge:
     user: User
 
 
-def start_challenge(db: Session, user: User, purpose: str) -> TwoFactorChallenge:
-    """Create a challenge and email its code. Older pending challenges for the
-    same user stop working."""
+def start_challenge(
+    db: Session, user: User, purpose: str, method: str = "email"
+) -> TwoFactorChallenge:
+    """Create a challenge. For "email" a code is generated and sent; for
+    "totp" the user's authenticator app supplies it. Older pending challenges
+    for the same user stop working."""
     crud.hard_delete_many(
         db, TwoFactorChallenge, {"user_id": user.id, "consumed_at": None}
     )
     challenge_id = new_id()
-    code = generate_otp()
     now = _now()
+    code = generate_otp() if method == "email" else None
     challenge = crud.create(
         db,
         TwoFactorChallenge,
@@ -169,13 +184,15 @@ def start_challenge(db: Session, user: User, purpose: str) -> TwoFactorChallenge
             "id": challenge_id,
             "user_id": user.id,
             "purpose": purpose,
-            "code_hash": hash_otp(challenge_id, code),
+            "method": method,
+            "code_hash": hash_otp(challenge_id, code) if code else None,
             "expires_at": now
             + timedelta(minutes=settings.two_factor_code_expire_minutes),
             "last_sent_at": now,
         },
     )
-    emails.send_two_factor_code(user.email, code, purpose)
+    if code:
+        emails.send_two_factor_code(user.email, code, purpose)
     return challenge
 
 
@@ -191,14 +208,17 @@ def _pending_challenge(db: Session, challenge_id: str) -> TwoFactorChallenge:
 
 
 def resend_challenge(db: Session, challenge_id: str) -> IssuedChallenge:
+    """Email a fresh code. On an authenticator challenge this is the "email me
+    a code instead" fallback, and switches the challenge to email."""
     challenge = db.get(TwoFactorChallenge, challenge_id)
     if challenge is None or challenge.consumed_at is not None:
         raise AuthError(400, "This sign-in attempt is no longer valid. Start again.")
 
+    switching = challenge.method == "totp"
     wait = settings.two_factor_resend_cooldown_seconds - int(
         (_now() - _aware(challenge.last_sent_at)).total_seconds()
     )
-    if wait > 0:
+    if wait > 0 and not switching:
         raise AuthError(
             429,
             f"Please wait {wait}s before requesting another code.",
@@ -211,6 +231,7 @@ def resend_challenge(db: Session, challenge_id: str) -> IssuedChallenge:
 
     code = generate_otp()
     now = _now()
+    challenge.method = "email"
     challenge.code_hash = hash_otp(challenge.id, code)
     challenge.attempts = 0
     challenge.last_sent_at = now
@@ -223,13 +244,67 @@ def resend_challenge(db: Session, challenge_id: str) -> IssuedChallenge:
     return IssuedChallenge(challenge, user)
 
 
+def _looks_like_recovery_code(code: str) -> bool:
+    return not code.isdigit()
+
+
+def _use_recovery_code(db: Session, user: User, code: str) -> bool:
+    hashed = hash_token(normalize_recovery_code(code))
+    row = (
+        db.query(RecoveryCode)
+        .filter(
+            RecoveryCode.user_id == user.id,
+            RecoveryCode.code_hash == hashed,
+            RecoveryCode.used_at.is_(None),
+        )
+        .first()
+    )
+    if row is None:
+        return False
+    row.used_at = _now()
+    return True
+
+
+def _use_totp(user: User, code: str) -> bool:
+    if not user.totp_secret or not code.isdigit():
+        return False
+    step = match_totp(decrypt_secret(user.totp_secret), code)
+    if step is None or (
+        user.totp_last_step is not None and step <= user.totp_last_step
+    ):
+        # Wrong, or a code that was already used in this time window.
+        return False
+    user.totp_last_step = step
+    return True
+
+
 def verify_challenge(db: Session, challenge_id: str, code: str) -> User:
-    """Check a code. Returns the user on success; the challenge is single-use."""
+    """Check a code. Returns the user on success; the challenge is single-use.
+
+    Email challenges take the emailed code. Authenticator challenges take the
+    app's current code or one of the user's recovery codes.
+    """
     challenge = _pending_challenge(db, challenge_id)
     if challenge.attempts >= settings.two_factor_max_attempts:
         raise AuthError(429, "Too many incorrect codes. Request a new one.")
 
-    if not otp_matches(challenge.id, code, challenge.code_hash):
+    user = users_service.get_user(db, challenge.user_id)
+    if user is None:
+        raise AuthError(400, "This code has expired. Request a new one.")
+
+    if challenge.method == "totp":
+        if _looks_like_recovery_code(code):
+            ok = _use_recovery_code(db, user, code)
+        else:
+            ok = _use_totp(user, code)
+    else:
+        ok = (
+            code.isdigit()
+            and challenge.code_hash is not None
+            and otp_matches(challenge.id, code, challenge.code_hash)
+        )
+
+    if not ok:
         challenge.attempts += 1
         db.commit()
         left = settings.two_factor_max_attempts - challenge.attempts
@@ -240,14 +315,78 @@ def verify_challenge(db: Session, challenge_id: str, code: str) -> User:
         )
 
     challenge.consumed_at = _now()
-    user = users_service.get_user(db, challenge.user_id)
-    if user is None:
-        raise AuthError(400, "This code has expired. Request a new one.")
-    if user.email_verified_at is None:
-        # Reading the code proves the owner controls the address.
+    if user.email_verified_at is None and challenge.method == "email":
+        # Reading the emailed code proves the owner controls the address.
         user.email_verified_at = _now()
     db.commit()
     db.refresh(user)
+    return user
+
+
+def login_method(user: User) -> str:
+    """Which second factor a password login should ask for."""
+    return "totp" if user.totp_enabled else "email"
+
+
+# ---------------------------------------------------------------------------
+# Authenticator app setup and onboarding
+# ---------------------------------------------------------------------------
+
+
+def begin_totp_setup(db: Session, user: User) -> tuple[str, str]:
+    """Create a pending authenticator secret. Returns (secret, otpauth_uri).
+
+    The secret only takes effect after confirm_totp, so abandoning setup
+    leaves sign-in unchanged.
+    """
+    if user.totp_enabled:
+        raise AuthError(409, "An authenticator app is already set up")
+    secret = generate_totp_secret()
+    user.totp_secret = encrypt_secret(secret)
+    user.totp_last_step = None
+    db.commit()
+    return secret, totp_uri(secret, user.email)
+
+
+def confirm_totp(db: Session, user: User, code: str) -> list[str]:
+    """Turn on the authenticator after checking a code from it. Returns
+    freshly generated recovery codes, which are shown once."""
+    if user.totp_enabled:
+        raise AuthError(409, "An authenticator app is already set up")
+    if not user.totp_secret:
+        raise AuthError(400, "Start authenticator setup first")
+    if not _use_totp(user, code):
+        db.commit()
+        raise AuthError(
+            400, "That code didn't match. Check the time on your phone and try again."
+        )
+
+    user.totp_enabled_at = _now()
+    user.two_factor_enabled = True
+    codes = generate_recovery_codes()
+    crud.hard_delete_many(db, RecoveryCode, {"user_id": user.id})
+    for recovery in codes:
+        db.add(RecoveryCode(user_id=user.id, code_hash=hash_token(recovery)))
+    db.commit()
+    db.refresh(user)
+    return codes
+
+
+def remaining_recovery_codes(db: Session, user: User) -> int:
+    return (
+        db.query(RecoveryCode)
+        .filter(RecoveryCode.user_id == user.id, RecoveryCode.used_at.is_(None))
+        .count()
+    )
+
+
+def complete_onboarding(db: Session, user: User) -> User:
+    if user.email_verified_at is None:
+        raise AuthError(400, "Verify your email before finishing setup")
+    if user.onboarding_completed_at is None:
+        user.onboarding_completed_at = _now()
+        db.commit()
+        db.refresh(user)
     return user
 
 

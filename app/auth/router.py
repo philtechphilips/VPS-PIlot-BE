@@ -1,5 +1,6 @@
 from typing import Annotated, NoReturn
 
+import segno
 from fastapi import APIRouter, Cookie, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 
@@ -9,14 +10,18 @@ from app.auth.models import TwoFactorChallenge
 from app.auth.schemas import (
     AuthResponse,
     ChallengeResponse,
+    CodeRequest,
     ForgotPasswordRequest,
     LoginRequest,
     MessageResponse,
+    RecoveryCodesResponse,
     ResendRequest,
     ResetPasswordRequest,
     SessionResponse,
     SetupRequest,
     SetupStatus,
+    TotpSetupResponse,
+    TwoFactorStatus,
     VerifyRequest,
 )
 from app.core.config import settings
@@ -56,6 +61,7 @@ def _challenge_response(challenge: TwoFactorChallenge, user: User) -> ChallengeR
     return ChallengeResponse(
         challenge_id=challenge.id,
         purpose=challenge.purpose,  # type: ignore[arg-type]
+        method=challenge.method,  # type: ignore[arg-type]
         email_hint=service.mask_email(user.email),
         expires_in=settings.two_factor_code_expire_minutes * 60,
         resend_in=settings.two_factor_resend_cooldown_seconds,
@@ -137,9 +143,13 @@ def login(body: LoginRequest, request: Request, response: Response, db: DbSessio
         _raise(error)
 
     if user.two_factor_enabled or user.email_verified_at is None:
-        purpose = "login" if user.email_verified_at else "setup"
+        if user.email_verified_at is None:
+            # Owner never finished verifying the address: do that first.
+            purpose, method = "setup", "email"
+        else:
+            purpose, method = "login", service.login_method(user)
         try:
-            challenge = service.start_challenge(db, user, purpose)
+            challenge = service.start_challenge(db, user, purpose, method)
         except EmailDeliveryError:
             raise EMAIL_FAILED from None
         return _challenge_response(challenge, user)
@@ -177,6 +187,53 @@ def resend_two_factor(body: ResendRequest, db: DbSession):
     except EmailDeliveryError:
         raise EMAIL_FAILED from None
     return _challenge_response(issued.challenge, issued.user)
+
+
+# ---------------------------------------------------------------------------
+# Authenticator app, recovery codes and onboarding
+# ---------------------------------------------------------------------------
+
+
+@router.get("/2fa/status", response_model=TwoFactorStatus)
+def two_factor_status(current_user: CurrentUser, db: DbSession):
+    return TwoFactorStatus(
+        method=current_user.two_factor_method,  # type: ignore[arg-type]
+        totp_enabled=current_user.totp_enabled,
+        recovery_codes_remaining=service.remaining_recovery_codes(db, current_user),
+    )
+
+
+@router.post("/2fa/totp/setup", response_model=TotpSetupResponse)
+def totp_setup(current_user: CurrentUser, db: DbSession):
+    """Start authenticator setup: returns the secret and a QR code to scan."""
+    try:
+        secret, uri = service.begin_totp_setup(db, current_user)
+    except service.AuthError as error:
+        _raise(error)
+    # Dark modules on white: many phone scanners can't read inverted codes.
+    qr_svg = segno.make(uri, error="m").svg_inline(
+        scale=5, border=2, dark="#000000", light="#ffffff"
+    )
+    return TotpSetupResponse(secret=secret, otpauth_uri=uri, qr_svg=qr_svg)
+
+
+@router.post("/2fa/totp/confirm", response_model=RecoveryCodesResponse)
+def totp_confirm(body: CodeRequest, current_user: CurrentUser, db: DbSession):
+    """Turn on the authenticator with a code from it. Returns recovery codes,
+    which are only ever shown here."""
+    try:
+        codes = service.confirm_totp(db, current_user, body.code)
+    except service.AuthError as error:
+        _raise(error)
+    return RecoveryCodesResponse(recovery_codes=codes)
+
+
+@router.post("/onboarding/complete", response_model=UserResponse)
+def onboarding_complete(current_user: CurrentUser, db: DbSession):
+    try:
+        return service.complete_onboarding(db, current_user)
+    except service.AuthError as error:
+        _raise(error)
 
 
 # ---------------------------------------------------------------------------
