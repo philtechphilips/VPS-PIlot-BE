@@ -11,6 +11,7 @@ Password = Annotated[str, Field(min_length=8, max_length=128)]
 class UserCreate(BaseModel):
     email: EmailStr
     password: Password
+    name: str | None = None
 
 
 class UserResponse(BaseModel):
@@ -18,7 +19,10 @@ class UserResponse(BaseModel):
 
     id: int
     email: EmailStr
+    name: str | None
     role: Role
+    two_factor_enabled: bool
+    email_verified: bool
     created_at: datetime
 
 

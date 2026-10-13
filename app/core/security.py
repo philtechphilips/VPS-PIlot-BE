@@ -1,5 +1,7 @@
 import hashlib
+import hmac
 import secrets
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -32,12 +34,17 @@ def verify_password(
 
 
 def create_access_token(
-    subject: str | int, expires_delta: timedelta | None = None
+    subject: str | int,
+    session_id: str | None = None,
+    expires_delta: timedelta | None = None,
 ) -> str:
     expire = datetime.now(UTC) + (
         expires_delta or timedelta(minutes=settings.access_token_expire_minutes)
     )
-    payload = {"sub": str(subject), "exp": expire}
+    payload: dict[str, Any] = {"sub": str(subject), "exp": expire, "type": "access"}
+    if session_id is not None:
+        # Ties the token to a session so revoking the session revokes the token.
+        payload["sid"] = session_id
     return jwt.encode(payload, settings.secret_key, algorithm=settings.algorithm)
 
 
@@ -46,13 +53,38 @@ def decode_access_token(token: str) -> dict[str, Any]:
     return jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
 
 
-def generate_reset_token() -> tuple[str, str]:
+def new_id() -> str:
+    """Random, unguessable identifier (32 hex chars)."""
+    return uuid.uuid4().hex
+
+
+def generate_token() -> tuple[str, str]:
     """Return (token, token_hash). Send the token to the user and store only
-    the hash, so a leaked database can't be used to reset passwords."""
+    the hash, so a leaked database can't be used to impersonate them."""
     token = secrets.token_urlsafe(32)
     return token, hash_token(token)
+
+
+# Kept for the password reset flow, which predates the generic name.
+generate_reset_token = generate_token
 
 
 def hash_token(token: str) -> str:
     # Tokens are long and random, so a fast hash is enough (unlike passwords).
     return hashlib.sha256(token.encode()).hexdigest()
+
+
+def generate_otp() -> str:
+    """Six-digit one-time code."""
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
+def hash_otp(challenge_id: str, code: str) -> str:
+    # Keyed and bound to the challenge: a 6-digit code has little entropy, so a
+    # plain hash in a leaked database would be trivial to reverse.
+    message = f"{challenge_id}:{code}".encode()
+    return hmac.new(settings.secret_key.encode(), message, hashlib.sha256).hexdigest()
+
+
+def otp_matches(challenge_id: str, code: str, code_hash: str) -> bool:
+    return hmac.compare_digest(hash_otp(challenge_id, code), code_hash)
