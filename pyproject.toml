@@ -1,0 +1,65 @@
+[project]
+name = "fast-api-starter"
+version = "0.1.0"
+description = "FastAPI starter template: feature-based layout, JWT auth, SQLAlchemy 2.0, Alembic"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "alembic>=1.20.0",
+    "fastapi[standard]>=0.143.0",
+    "psycopg2-binary>=2.9.13",
+    "pwdlib[argon2,bcrypt]>=0.3.1",
+    "pydantic-settings>=2.15.0",
+    "pyjwt>=2.15.1",
+    "sqlalchemy>=2.0.54",
+]
+
+[dependency-groups]
+dev = [
+    "httpx2>=2.13.1",
+    "poethepoet>=0.48.0",
+    "pytest>=9.1.1",
+    "ruff>=0.17.0",
+]
+
+# Project commands, like npm scripts. Run `uv run poe` to list them.
+[tool.poe.tasks]
+dev = { cmd = "fastapi dev app/main.py", help = "Run the dev server with auto-reload" }
+start = { cmd = "fastapi run app/main.py", help = "Run the production server" }
+test = { cmd = "pytest", help = "Run the tests (extra args go to pytest)" }
+lint = { sequence = [
+    "ruff check --fix .",
+    "ruff format .",
+], default_item_type = "cmd", help = "Fix lint issues and format the code" }
+check = { sequence = [
+    "ruff check .",
+    "ruff format --check .",
+    "pytest",
+], default_item_type = "cmd", help = "Lint, format check and tests without changing files (for CI)" }
+migrate = { cmd = "alembic upgrade head", help = "Apply all pending migrations" }
+downgrade = { cmd = "alembic downgrade -1", help = "Undo the last migration" }
+createadmin = { cmd = "python -m app.users.create_admin", help = "Create an admin, or promote a user: poe createadmin <email>" }
+clean = { shell = "find . -name __pycache__ -not -path './.venv/*' -prune -exec rm -rf {} + && rm -rf .pytest_cache .ruff_cache", help = "Delete __pycache__ and tool caches" }
+
+[tool.poe.tasks.makemigration]
+cmd = "alembic revision --autogenerate -m ${message}"
+help = "Generate a migration from model changes"
+args = [{ name = "message", positional = true, required = true, help = "Short description, e.g. \"add user bio\"" }]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+extend-exclude = ["migrations/versions"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+# Allow TypeVar-style generics (crud.py) alongside PEP 695 syntax
+ignore = ["UP047"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's Depends()/Query() in defaults is idiomatic
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query"]
