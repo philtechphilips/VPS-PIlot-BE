@@ -36,9 +36,7 @@ def test_setup_returns_secret_and_qr(client, db: Session, outbox):
     headers = sign_in(client, outbox, "bob@example.com")
     body = client.post(f"{AUTH}/2fa/totp/setup", headers=headers).json()
     assert len(body["secret"]) == 32
-    assert body["otpauth_uri"].startswith(
-        "otpauth://totp/VPSPilot%3Abob%40example.com?"
-    )
+    assert body["otpauth_uri"].startswith("otpauth://totp/VPSPilot:bob%40example.com?")
     assert body["qr_svg"].startswith("<svg")
     # Pending until confirmed: sign-in still uses email codes.
     me = client.get(f"{AUTH}/me", headers=headers).json()
@@ -157,3 +155,22 @@ def test_new_owner_must_finish_onboarding(client, db: Session, outbox):
     assert done.json()["onboarding_completed"] is True
     me = client.get(f"{AUTH}/me", headers=headers).json()
     assert me["onboarding_completed"] is True
+
+
+def test_qr_is_scannable_shape(client, db: Session, outbox):
+    """The QR must scale (viewBox, no fixed size) and encode a canonical URI.
+
+    A fixed-size SVG squeezed into a smaller box gets cropped, not scaled, and
+    some apps (Microsoft Authenticator) reject an encoded ':' or extra params.
+    """
+    create_user(db, "bob@example.com")
+    headers = sign_in(client, outbox, "bob@example.com")
+    body = client.post(f"{AUTH}/2fa/totp/setup", headers=headers).json()
+
+    svg_tag = body["qr_svg"].split(">", 1)[0]
+    assert "viewBox" in svg_tag
+    assert "width=" not in svg_tag and "height=" not in svg_tag
+    assert body["otpauth_uri"] == (
+        f"otpauth://totp/VPSPilot:bob%40example.com?secret={body['secret']}"
+        "&issuer=VPSPilot"
+    )

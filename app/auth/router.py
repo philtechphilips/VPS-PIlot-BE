@@ -210,9 +210,11 @@ def totp_setup(current_user: CurrentUser, db: DbSession):
         secret, uri = service.begin_totp_setup(db, current_user)
     except service.AuthError as error:
         _raise(error)
-    # Dark modules on white: many phone scanners can't read inverted codes.
+    # Dark modules on white (many scanners can't read inverted codes), the
+    # standard 4-module quiet zone, and a viewBox instead of a fixed size so
+    # the browser scales the code rather than cropping it.
     qr_svg = segno.make(uri, error="m").svg_inline(
-        scale=5, border=2, dark="#000000", light="#ffffff"
+        border=4, omitsize=True, dark="#000000", light="#ffffff"
     )
     return TotpSetupResponse(secret=secret, otpauth_uri=uri, qr_svg=qr_svg)
 

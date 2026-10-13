@@ -132,17 +132,12 @@ def match_totp(secret: str, code: str, now: float | None = None) -> int | None:
 
 
 def totp_uri(secret: str, account: str, issuer: str = "VPSPilot") -> str:
-    label = quote(f"{issuer}:{account}")
-    query = urlencode(
-        {
-            "secret": secret,
-            "issuer": issuer,
-            "algorithm": "SHA1",
-            "digits": TOTP_DIGITS,
-            "period": TOTP_PERIOD,
-        }
-    )
-    return f"otpauth://totp/{label}?{query}"
+    """Key URI in the most widely accepted form (Google's spec, as pyotp
+    writes it): a literal ":" between issuer and account, and the defaults
+    (SHA1, 6 digits, 30 s) left out. Some apps, Microsoft Authenticator
+    among them, are picky about the extras and an encoded separator."""
+    label = f"{quote(issuer)}:{quote(account)}"
+    return f"otpauth://totp/{label}?{urlencode({'secret': secret, 'issuer': issuer})}"
 
 
 def _fernet() -> Fernet:
