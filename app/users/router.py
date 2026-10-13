@@ -6,21 +6,11 @@ from app.auth.dependencies import AdminUser, CurrentUser
 from app.core.database import DbSession
 from app.users import service
 from app.users.models import Role
-from app.users.schemas import RoleUpdate, UserCreate, UserResponse
+from app.users.schemas import RoleUpdate, UserResponse
 
-router = APIRouter(prefix="/users", tags=["Users"])
-
-
-@router.post("/", status_code=status.HTTP_201_CREATED, response_model=UserResponse)
-def create_user(user_in: UserCreate, db: DbSession):
-    if service.get_user_by_email(db, user_in.email):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"User with email {user_in.email} already exists",
-        )
-    # Sign-ups are always regular users; admins are made by another admin
-    # or with `uv run poe createadmin`.
-    return service.create_user(db, user_in)
+# There is no public sign-up: the owner is created through
+# /api/v1/auth/setup, and further admins with `uv run poe createadmin`.
+router = APIRouter(prefix="/api/v1/users", tags=["Users"])
 
 
 @router.get("/me", response_model=UserResponse)

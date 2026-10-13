@@ -51,5 +51,7 @@ def send_email(to: str, subject: str, html: str, text: str) -> None:
 
     if response.status_code >= 400:
         # Resend returns a JSON body with a "message"; never log the API key.
-        logger.error("Resend rejected email (%s): %s", response.status_code, response.text)
+        logger.error(
+            "Resend rejected email (%s): %s", response.status_code, response.text
+        )
         raise EmailDeliveryError("Email provider rejected the message")

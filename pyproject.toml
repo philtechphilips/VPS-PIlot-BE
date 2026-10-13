@@ -61,6 +61,10 @@ select = ["E", "F", "I", "B", "UP"]
 # Allow TypeVar-style generics (crud.py) alongside PEP 695 syntax
 ignore = ["UP047"]
 
+[tool.ruff.lint.per-file-ignores]
+# Inline-styled email HTML can't be wrapped sensibly.
+"app/auth/emails.py" = ["E501"]
+
 [tool.ruff.lint.flake8-bugbear]
 # FastAPI's Depends()/Query() in defaults is idiomatic
 extend-immutable-calls = ["fastapi.Depends", "fastapi.Query"]

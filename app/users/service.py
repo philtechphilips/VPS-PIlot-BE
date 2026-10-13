@@ -21,6 +21,7 @@ def list_users(db: Session, limit: int = 10, skip: int = 0) -> list[User]:
 def create_user(db: Session, user_in: UserCreate, role: Role = Role.USER) -> User:
     data = {
         "email": user_in.email,
+        "name": user_in.name,
         "password": hash_password(user_in.password),
         "role": role,
     }
