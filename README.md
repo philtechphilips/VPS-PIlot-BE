@@ -44,7 +44,7 @@ All routes are under `/api/v1/auth`.
 ```
 GET  /setup-status         → {needs_setup}            first run only
 POST /setup                → challenge, emails code   creates the owner (admin)
-POST /login                → challenge, emails code   password check + lockout
+POST /login                → challenge                password check + lockout; emails a code unless an authenticator is set up
 POST /2fa/verify           → access token + cookie    code → session
 POST /2fa/resend           → new challenge            30 s cooldown
 POST /refresh              → access token + cookie    rotates the refresh token
@@ -53,14 +53,25 @@ GET  /me                   → user
 GET  /sessions             → signed-in devices
 DELETE /sessions/{id}      → revoke one device
 POST /sessions/revoke-others
+GET  /2fa/status           → method, recovery codes left
+POST /2fa/totp/setup       → secret + QR (pending until confirmed)
+POST /2fa/totp/confirm     → turns the authenticator on, returns recovery codes
+POST /onboarding/complete  → marks the setup wizard finished
 POST /forgot-password      → same reply for any email; emails a reset link
 POST /reset-password       → sets the password and signs out every device
 ```
 
 **How it is protected**
 
+- **Second factor**: an authenticator app (TOTP) when set up, otherwise an
+  emailed code. `/2fa/resend` on an authenticator challenge emails a code
+  instead; recovery codes (10, single use, stored hashed) also work there.
 - **Codes**: 6 digits, valid 10 minutes, 5 attempts, single use. Only an HMAC
-  of the code (keyed with `SECRET_KEY`, bound to the challenge) is stored.
+  of an emailed code (keyed with `SECRET_KEY`, bound to the challenge) is
+  stored. Authenticator secrets are encrypted at rest, and a TOTP code can't
+  be replayed inside its 30-second window.
+- **Onboarding**: owners have `onboarding_completed`; the dashboard keeps
+  sending them to the setup wizard until it's set.
 - **Lockout**: 5 wrong passwords lock the account for 15 minutes. Unknown
   emails get the same error and similar timing as wrong passwords.
 - **Sessions**: access tokens last 15 minutes and carry a session id; revoking
