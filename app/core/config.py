@@ -5,7 +5,7 @@ from sqlalchemy import URL
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    project_name: str = "FastAPI Starter"
+    project_name: str = "VPSPilot API"
 
     database_hostname: str
     database_port: int = 5432

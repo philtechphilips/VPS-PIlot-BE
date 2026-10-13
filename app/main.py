@@ -21,7 +21,7 @@ app.include_router(users_router)
 
 @app.get("/")
 def root():
-    return {"message": "Hello World pushing out to ubuntu"}
+    return {"name": settings.project_name, "docs": "/docs"}
 
 
 @app.get("/health")

@@ -1,7 +1,7 @@
 [project]
-name = "fast-api-starter"
+name = "vpspilot-api"
 version = "0.1.0"
-description = "FastAPI starter template: feature-based layout, JWT auth, SQLAlchemy 2.0, Alembic"
+description = "VPSPilot control-plane API"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
