@@ -4,6 +4,7 @@ import segno
 from fastapi import APIRouter, Cookie, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 
+from app.audit import service as audit
 from app.auth import emails, service
 from app.auth.dependencies import CurrentSessionId, CurrentUser
 from app.auth.models import TwoFactorChallenge
@@ -46,6 +47,30 @@ def _raise(error: service.AuthError) -> NoReturn:
     headers = {"Retry-After": str(error.retry_after)} if error.retry_after else None
     raise HTTPException(
         status_code=error.status_code, detail=error.detail, headers=headers
+    )
+
+
+def _audit(
+    db,
+    request: Request | None,
+    action: str,
+    result: str,
+    user: User | None = None,
+    label: str | None = None,
+    detail: str | None = None,
+) -> None:
+    """Auth events for the audit log. Never pass passwords, codes or tokens."""
+    audit.record(
+        db,
+        action=action,
+        result=result,
+        actor=f"user:{user.id}" if user else "anonymous",
+        actor_label=(user.email if user else label) or "unknown",
+        target_type="user" if user else None,
+        target_id=str(user.id) if user else None,
+        target_label=user.email if user else None,
+        detail=detail,
+        request=request,
     )
 
 
@@ -112,10 +137,11 @@ def setup_status(db: DbSession):
 @router.post(
     "/setup", response_model=ChallengeResponse, status_code=status.HTTP_201_CREATED
 )
-def setup(body: SetupRequest, db: DbSession):
+def setup(body: SetupRequest, request: Request, db: DbSession):
     """Create the owner account and email a code to verify the address."""
     try:
         user = service.setup_owner(db, body.name, body.email, body.password)
+        _audit(db, request, "auth.setup", "success", user)
         challenge = service.start_challenge(db, user, "setup")
     except service.AuthError as error:
         _raise(error)
@@ -140,6 +166,14 @@ def login(body: LoginRequest, request: Request, response: Response, db: DbSessio
     try:
         user = service.login(db, body.email, body.password)
     except service.AuthError as error:
+        _audit(
+            db,
+            request,
+            "auth.login",
+            "failure",
+            label=str(body.email),
+            detail=error.detail,
+        )
         _raise(error)
 
     if user.two_factor_enabled or user.email_verified_at is None:
@@ -157,6 +191,7 @@ def login(body: LoginRequest, request: Request, response: Response, db: DbSessio
     session, refresh_token = service.create_session(
         db, user, request.headers.get("user-agent"), _client_ip(request)
     )
+    _audit(db, request, "auth.login", "success", user, detail="password only")
     _set_refresh_cookie(response, refresh_token)
     return _auth_response(user, session.id)
 
@@ -169,11 +204,13 @@ def verify_two_factor(
     try:
         user = service.verify_challenge(db, body.challenge_id, body.code)
     except service.AuthError as error:
+        _audit(db, request, "auth.2fa.verify", "failure", detail=error.detail)
         _raise(error)
 
     session, refresh_token = service.create_session(
         db, user, request.headers.get("user-agent"), _client_ip(request)
     )
+    _audit(db, request, "auth.login", "success", user, detail="with second factor")
     _set_refresh_cookie(response, refresh_token)
     return _auth_response(user, session.id)
 
@@ -220,13 +257,16 @@ def totp_setup(current_user: CurrentUser, db: DbSession):
 
 
 @router.post("/2fa/totp/confirm", response_model=RecoveryCodesResponse)
-def totp_confirm(body: CodeRequest, current_user: CurrentUser, db: DbSession):
+def totp_confirm(
+    body: CodeRequest, request: Request, current_user: CurrentUser, db: DbSession
+):
     """Turn on the authenticator with a code from it. Returns recovery codes,
     which are only ever shown here."""
     try:
         codes = service.confirm_totp(db, current_user, body.code)
     except service.AuthError as error:
         _raise(error)
+    _audit(db, request, "auth.2fa.totp_enable", "success", current_user)
     return RecoveryCodesResponse(recovery_codes=codes)
 
 
@@ -290,18 +330,32 @@ def sessions(current_user: CurrentUser, session_id: CurrentSessionId, db: DbSess
 
 
 @router.delete("/sessions/{target_id}", status_code=status.HTTP_204_NO_CONTENT)
-def revoke_session(target_id: str, current_user: CurrentUser, db: DbSession):
+def revoke_session(
+    target_id: str, request: Request, current_user: CurrentUser, db: DbSession
+):
     session = service.get_active_session(db, target_id)
     if session is None or session.user_id != current_user.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
     service.revoke_session(db, session)
+    _audit(db, request, "auth.session.revoke", "success", current_user)
 
 
 @router.post("/sessions/revoke-others", response_model=MessageResponse)
 def revoke_other_sessions(
-    current_user: CurrentUser, session_id: CurrentSessionId, db: DbSession
+    request: Request,
+    current_user: CurrentUser,
+    session_id: CurrentSessionId,
+    db: DbSession,
 ):
     count = service.revoke_other_sessions(db, current_user, session_id)
+    _audit(
+        db,
+        request,
+        "auth.session.revoke_others",
+        "success",
+        current_user,
+        detail=f"{count} sessions",
+    )
     return MessageResponse(
         message=f"Signed out of {count} other session{'s' if count != 1 else ''}"
     )
@@ -331,10 +385,12 @@ def forgot_password(body: ForgotPasswordRequest, db: DbSession):
 
 
 @router.post("/reset-password", response_model=MessageResponse)
-def reset_password(body: ResetPasswordRequest, db: DbSession):
+def reset_password(body: ResetPasswordRequest, request: Request, db: DbSession):
     if not service.reset_password(db, body.token, body.new_password):
+        _audit(db, request, "auth.password_reset", "failure", detail="bad token")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid or expired reset token",
         )
+    _audit(db, request, "auth.password_reset", "success")
     return MessageResponse(message="Password has been reset")
