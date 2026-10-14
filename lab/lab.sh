@@ -8,6 +8,7 @@
 #   ./lab/lab.sh enroll web-1 ept_...            enroll with a token (no quoting needed)
 #   ./lab/lab.sh enroll web-1 ept_... https://x.ngrok-free.app   ...via another API URL
 #   ./lab/lab.sh enroll web-1 '<install command from the dashboard>'
+#   ./lab/lab.sh upgrade web-1      update the agent from the API it's enrolled with
 #   ./lab/lab.sh shell web-1        open a shell in a VM
 #   ./lab/lab.sh stop web-2         stop a VM (watch it go offline)
 #   ./lab/lab.sh start web-2
@@ -80,6 +81,13 @@ case "${1:-}" in
   up) cmd_up ;;
   status) cmd_status ;;
   enroll) shift; cmd_enroll "$@" ;;
+  upgrade)
+    # Re-run the installer without a token: keeps the enrollment, updates the code.
+    limactl shell "${2:?vm name}" -- bash -c '
+      url=$(sudo python3 -c "import json; print(json.load(open(\"/etc/vpspilot/agent.json\"))[\"api_url\"])") || { echo "Not enrolled yet" >&2; exit 1; }
+      echo "==> Upgrading from $url"
+      curl -fsSL "$url/agent/install.sh" | sudo bash'
+    ;;
   shell) limactl shell "${2:?vm name}" ;;
   stop) limactl stop "${2:?vm name}" ;;
   start) limactl start "${2:?vm name}" --tty=false ;;
@@ -90,5 +98,5 @@ case "${1:-}" in
       exists "$name" && limactl delete --force "$name"
     done
     ;;
-  *) sed -n '2,13p' "$0"; exit 2 ;;
+  *) sed -n '2,/^set -euo/p' "$0" | sed '$d'; exit 2 ;;
 esac
