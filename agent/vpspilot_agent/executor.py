@@ -26,9 +26,18 @@ SUPPORTED = {
     "app.deploy",
     "app.remove",
     "app.logs",
+    "db.create",
+    "db.remove",
+    "db.control",
+    "db.query",
+    "db.explore",
+    "db.admin",
+    "db.redis",
 }
 # Long operations that stream progress from the helper.
-STREAMING = {"app.deploy", "app.remove"}
+STREAMING = {"app.deploy", "app.remove", "db.create", "db.remove"}
+# Read-only, frequent: no "Running ..." progress event.
+QUIET = {"app.logs", "db.query", "db.explore", "db.redis"}
 STREAM_IDLE_TIMEOUT = 30 * 60
 MAX_OUTPUT = 256 * 1024
 MAX_EVENT = 2000
@@ -124,13 +133,23 @@ def run_job(client: Client, job: dict[str, Any], call: HelperCall = helper.call)
     if job_type in STREAMING:
         return _run_streaming(client, job, call, finish)
 
-    if job_type != "app.logs":  # polled often; no progress needed
+    args = dict(job.get("payload") or {})
+    if args.pop("has_secrets", False):
+        try:
+            args["secrets"] = client.get(f"{base}/secrets").get("secrets") or {}
+        except ApiError as error:
+            if isinstance(error, NotEnrolled):
+                raise
+            return finish(
+                False, None, "", f"Couldn't load credentials: {error.message}"
+            )
+    if job_type not in QUIET:
         client.post(
             f"{base}/events",
             {"events": [{"level": "info", "message": f"Running {job_type}"}]},
         )
     try:
-        result = call(job_type, job.get("payload") or {})
+        result = call(job_type, args)
     except OSError as error:
         return finish(False, None, "", f"Privileged helper unavailable: {error}")
     if "error" in result and "exit_code" not in result:
@@ -161,6 +180,15 @@ def _run_streaming(
             return finish(
                 False, None, "", f"Couldn't load environment: {error.message}"
             )
+    elif args.pop("has_secrets", False):
+        try:
+            args["secrets"] = client.get(f"{base}/secrets").get("secrets") or {}
+        except ApiError as error:
+            if isinstance(error, NotEnrolled):
+                raise
+            return finish(
+                False, None, "", f"Couldn't load credentials: {error.message}"
+            )
     sink = EventSink(client, base)
     try:
         result = call(job["type"], args, timeout=STREAM_IDLE_TIMEOUT, on_event=sink)
@@ -175,6 +203,6 @@ def _run_streaming(
         ok,
         result.get("exit_code"),
         sink.output() or result.get("output", ""),
-        None if ok else (result.get("error") or "Deployment failed"),
+        None if ok else (result.get("error") or "The operation failed"),
         {k: v for k, v in (result.get("result") or {}).items() if v is not None},
     )

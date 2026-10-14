@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 import app.apps.models  # noqa: F401  (register all tables)
 import app.audit.models  # noqa: F401
 import app.auth.models  # noqa: F401
+import app.databases.models  # noqa: F401
 import app.github.models  # noqa: F401
 import app.jobs.models  # noqa: F401
 import app.notifications.models  # noqa: F401
@@ -26,6 +27,8 @@ import app.servers.models  # noqa: F401
 from app.apps.models import Application
 from app.apps.service import ENV_PURPOSE
 from app.core.security import encrypt_secret, reencrypt_secret
+from app.databases.models import DatabaseCredential, DatabaseInstance, DatabaseQuery
+from app.databases.service import PURPOSE as DB_PURPOSE
 from app.github.models import GitHubApp
 from app.github.service import PURPOSE as GITHUB_PURPOSE
 from app.jobs.models import Job
@@ -34,7 +37,7 @@ from app.users.models import User
 
 
 def rotate(db: Session) -> dict[str, int]:
-    counts = {"totp": 0, "env": 0, "github": 0, "job_output": 0}
+    counts = {"totp": 0, "env": 0, "github": 0, "job_output": 0, "database": 0}
     for user in db.scalars(select(User).where(User.totp_secret.is_not(None))):
         user.totp_secret = reencrypt_secret(user.totp_secret, "totp")
         counts["totp"] += 1
@@ -50,6 +53,22 @@ def rotate(db: Session) -> dict[str, int]:
         if gh.webhook_secret:
             gh.webhook_secret = reencrypt_secret(gh.webhook_secret, GITHUB_PURPOSE)
         counts["github"] += 1
+    for instance in db.scalars(select(DatabaseInstance)):
+        if instance.admin_password:
+            instance.admin_password = reencrypt_secret(
+                instance.admin_password, DB_PURPOSE
+            )
+            counts["database"] += 1
+    for credential in db.scalars(select(DatabaseCredential)):
+        credential.password = reencrypt_secret(credential.password, DB_PURPOSE)
+        if credential.pending_password:
+            credential.pending_password = reencrypt_secret(
+                credential.pending_password, DB_PURPOSE
+            )
+        counts["database"] += 1
+    for query in db.scalars(select(DatabaseQuery)):
+        query.sql = reencrypt_secret(query.sql, DB_PURPOSE)
+        counts["database"] += 1
     for job in db.scalars(select(Job).where(Job.output.is_not(None))):
         try:
             job.output = reencrypt_secret(job.output, OUTPUT_PURPOSE)

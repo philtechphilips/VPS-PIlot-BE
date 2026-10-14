@@ -146,7 +146,105 @@ class AppLogsPayload(Strict):
     since: Since | None = None
 
 
+# ---------------------------------------------------------------------------
+# Databases (internal: created by app.databases.service)
+# ---------------------------------------------------------------------------
+
+Engine = Literal["postgres", "mysql", "mariadb", "redis"]
+DbIdent = Annotated[str, StringConstraints(pattern=r"^[a-z_][a-z0-9_]{0,62}$")]
+DbHost = Annotated[
+    str, StringConstraints(pattern=r"^([A-Za-z0-9.-]{1,253}|\[[0-9a-fA-F:]{2,39}\])$")
+]
+DbObject = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_$ -]{1,128}$")]
+
+
+class DbTarget(Strict):
+    mode: Literal["managed", "external"]
+    engine: Engine
+    name: AppName | None = None  # managed
+    user: (
+        Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_.@-]{1,63}$")] | None
+    ) = None
+    host: DbHost | None = None  # external
+    port: Port | None = None
+
+
+class DbJob(Strict):
+    instance_id: HexId
+    # Passwords and SQL are fetched by the agent, never stored in the job.
+    has_secrets: bool = True
+
+
+class DbCreatePayload(DbJob):
+    name: AppName
+    engine: Engine
+    version: Annotated[str, StringConstraints(pattern=r"^[0-9.]{1,8}$")]
+    user: DbIdent | None = None
+    database: DbIdent | None = None
+    local_port: HostPort | None = None
+
+
+class DbRemovePayload(Strict):
+    instance_id: HexId
+    name: AppName
+    delete_data: bool = False
+
+
+class DbControlPayload(Strict):
+    instance_id: HexId
+    name: AppName
+    action: Literal["start", "stop", "restart"]
+
+
+class DbQueryPayload(DbJob):
+    target: DbTarget
+    query_id: HexId
+    database: DbIdent | None = None
+    readonly: bool = True
+    max_rows: Annotated[int, Field(ge=1, le=1000)] = 500
+    timeout: Annotated[int, Field(ge=1, le=120)] = 15
+
+
+class DbExplorePayload(DbJob):
+    target: DbTarget
+    what: Literal["databases", "users", "stats", "tables", "columns"]
+    database: DbIdent | None = None
+    namespace: DbObject | None = None  # schema (PostgreSQL) or database (MySQL)
+    table: DbObject | None = None
+
+
+class DbAdminPayload(DbJob):
+    target: DbTarget
+    action: Literal[
+        "create_database", "drop_database", "create_user", "set_password", "drop_user"
+    ]
+    database: DbIdent | None = None
+    user: DbIdent | None = None
+    access: Literal["owner", "readwrite", "readonly"] = "readwrite"
+    credential_id: HexId | None = None
+
+
+class DbRedisPayload(DbJob):
+    target: DbTarget
+    action: Literal["info", "scan", "get", "delete"]
+    pattern: (
+        Annotated[str, StringConstraints(pattern=r"^[^\x00-\x1f\x7f]{1,200}$")] | None
+    ) = None
+    cursor: Annotated[int, Field(ge=0)] = 0
+    count: Annotated[int, Field(ge=1, le=1000)] = 100
+    key: (
+        Annotated[str, StringConstraints(pattern=r"^[^\x00-\x1f\x7f]{1,512}$")] | None
+    ) = None
+
+
 JOB_TYPES: dict[str, type[Strict]] = {
+    "db.create": DbCreatePayload,
+    "db.remove": DbRemovePayload,
+    "db.control": DbControlPayload,
+    "db.query": DbQueryPayload,
+    "db.explore": DbExplorePayload,
+    "db.admin": DbAdminPayload,
+    "db.redis": DbRedisPayload,
     "app.deploy": AppDeployPayload,
     "app.remove": AppRemovePayload,
     "app.logs": AppLogsPayload,

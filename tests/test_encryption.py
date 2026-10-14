@@ -97,8 +97,12 @@ def test_key_rotation(client, admin_headers, db: Session, monkeypatch):
     app = db.scalar(select(Application))
     assert apps.env_values(app)["DATABASE_URL"] == SECRET_ENV
 
+    from tests.test_databases import managed
+
+    managed(client, admin_headers)
     counts = rotate(db)
     assert counts["env"] == 2 and counts["totp"] == 1 and counts["job_output"] >= 1
+    assert counts["database"] == 1
 
     # Afterwards only the new key is needed.
     new_only = _derive("brand-new-encryption-key", apps.ENV_PURPOSE)

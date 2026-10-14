@@ -30,6 +30,7 @@ from vpspilot_agent import buildpacks
 from vpspilot_agent.errors import Rejected
 
 APPS_DIR = "/var/lib/vpspilot-apps"
+NETWORK = "vpspilot"
 IMAGE_PREFIX = "vpspilot"
 KEEP_IMAGES = 5
 
@@ -293,6 +294,9 @@ def _run_args(
         "-d",
         "--name",
         name,
+        # Private network shared with managed databases (vpdb-<name>).
+        "--network",
+        NETWORK,
         "--env-file",
         env_file,
         "-p",
@@ -592,6 +596,8 @@ def deploy(args: dict[str, Any], emit: Emit) -> dict[str, Any]:
         if shutil.which("docker") is None:
             raise Failed("Docker isn't installed on this server")
         _check_port(spec["host_port"], {live, previous, candidate}, say)
+        if _run(["docker", "network", "inspect", NETWORK], timeout=15)[0] != 0:
+            _run(["docker", "network", "create", NETWORK], timeout=30)
         source = spec["source"]
         if source["type"] == "git":
             if shutil.which("git") is None:

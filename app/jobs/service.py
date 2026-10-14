@@ -22,7 +22,7 @@ def job_output(job: Job) -> str | None:
 QUEUE_TTL = timedelta(minutes=10)  # unclaimed jobs expire
 RUN_TIMEOUT = timedelta(minutes=5)  # claimed jobs must finish in time
 # Builds take longer than service actions.
-RUN_TIMEOUTS = {"app.deploy": timedelta(minutes=25)}
+RUN_TIMEOUTS = {"app.deploy": timedelta(minutes=25), "db.create": timedelta(minutes=15)}
 LONGEST_TIMEOUT = max([RUN_TIMEOUT, *RUN_TIMEOUTS.values()])
 MAX_OUTPUT = 64 * 1024
 MAX_EVENTS_PER_JOB = 500
@@ -126,6 +126,8 @@ def create(
         idempotency_key=idempotency_key,
         created_by=actor,
         correlation_id=new_id(),
+        # Explicit (microseconds): jobs queued together run in order.
+        created_at=_now(),
         expires_at=_now() + QUEUE_TTL,
     )
     db.add(job)
@@ -169,7 +171,8 @@ def list_jobs(db: Session, server_id: str | None = None, limit: int = 30) -> lis
     # Log reads are polled every few seconds; they'd drown the activity list.
     query = (
         select(Job)
-        .where(Job.type != "app.logs")
+        # Database reads (queries, browsing) are as frequent as log reads.
+        .where(Job.type.not_in(("app.logs", "db.query", "db.explore", "db.redis")))
         .order_by(Job.created_at.desc(), Job.id)
         .limit(limit)
     )

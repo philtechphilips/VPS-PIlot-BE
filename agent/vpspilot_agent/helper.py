@@ -26,7 +26,7 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
-from vpspilot_agent import deploy
+from vpspilot_agent import databases, deploy
 from vpspilot_agent.errors import Rejected
 
 log = logging.getLogger("vpspilot_helper")
@@ -132,7 +132,11 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "container.logs": _container_logs,
     "docker.ps": _docker_ps,
     "app.logs": deploy.app_logs,
+    **databases.OPERATIONS,
 }
+
+# Long operations that report progress as they go.
+STREAMING_OPS = {**deploy.STREAMING, **databases.STREAMING}
 
 
 def _no_events(level: str, message: str) -> None:
@@ -144,13 +148,11 @@ def handle(request: dict[str, Any], emit: deploy.Emit = _no_events) -> dict[str,
     through emit(level, message) as they go."""
     op = request.get("op")
     args = request.get("args") or {}
-    if (op not in OPERATIONS and op not in deploy.STREAMING) or not isinstance(
-        args, dict
-    ):
+    if (op not in OPERATIONS and op not in STREAMING_OPS) or not isinstance(args, dict):
         return {"ok": False, "error": f"operation not allowed: {op}"}
     try:
-        if op in deploy.STREAMING:
-            result = deploy.STREAMING[op](args, emit)
+        if op in STREAMING_OPS:
+            result = STREAMING_OPS[op](args, emit)
         else:
             result = OPERATIONS[op](args)
     except Rejected as error:
