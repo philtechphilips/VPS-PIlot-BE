@@ -67,6 +67,7 @@ ignore = ["UP047"]
 [tool.ruff.lint.per-file-ignores]
 # Inline-styled email HTML can't be wrapped sensibly.
 "app/auth/emails.py" = ["E501"]
+"app/notifications/emails.py" = ["E501"]
 # The agent must run on the stock Python of Ubuntu 22.04 (3.10).
 "agent/**" = ["UP017"]
 # Generated Dockerfile lines, fixtures and user-facing hints read better unwrapped.

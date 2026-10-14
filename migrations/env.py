@@ -10,6 +10,7 @@ import app.audit.models  # noqa: F401
 import app.auth.models  # noqa: F401
 import app.github.models  # noqa: F401
 import app.jobs.models  # noqa: F401
+import app.notifications.models  # noqa: F401
 import app.servers.models  # noqa: F401
 import app.users.models  # noqa: F401
 from app.core.config import settings

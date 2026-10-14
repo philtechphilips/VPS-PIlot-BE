@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 from app.core import email as mailer  # noqa: E402
 from app.core.database import Base, get_db  # noqa: E402
 from app.main import app  # noqa: E402
+from app.notifications import service as notify_service  # noqa: E402
 from app.users import service as users_service  # noqa: E402
 from app.users.models import Role, User  # noqa: E402
 from app.users.schemas import UserCreate  # noqa: E402
@@ -60,6 +61,8 @@ class SentEmail:
 def outbox(monkeypatch) -> list[SentEmail]:
     """Captures every email instead of sending it."""
     sent: list[SentEmail] = []
+    # Notification emails normally go out on a worker thread; run them inline.
+    monkeypatch.setattr(notify_service, "_background", lambda fn, *args: fn(*args))
     monkeypatch.setattr(
         mailer,
         "send_email",

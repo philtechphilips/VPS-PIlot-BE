@@ -15,6 +15,7 @@ from app.core.security import decrypt_secret, encrypt_secret, new_id
 from app.github import service as github
 from app.jobs import service as jobs
 from app.jobs.models import Job
+from app.notifications import service as notifications
 from app.servers.models import Server
 
 NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$")
@@ -488,12 +489,20 @@ def on_job_finished(db: Session, job: Job) -> None:
             result.get("commit_message") or deployment.commit_message or ""
         )[:300] or None
         deployment.image_ref = result.get("image_ref") or deployment.requested_ref
-        app = db.get(Application, deployment.application_id)
-        if app:
-            app.current_deployment_id = deployment.id
     else:
         deployment.status = "canceled" if job.status == "canceled" else "failed"
         deployment.error = job.error or f"Job {job.status}"
+    app = db.get(Application, deployment.application_id)
+    if app is None:
+        return
+    if deployment.status in ("succeeded", "failed"):
+        # Before promoting, so a failure can tell whether an older version
+        # is still live.
+        notifications.deployment_finished(
+            db, deployment, app, db.get(Server, app.server_id)
+        )
+    if deployment.status == "succeeded":
+        app.current_deployment_id = deployment.id
 
 
 jobs.on_finished.append(on_job_finished)
