@@ -224,17 +224,17 @@ def create_managed(
     return instance, job
 
 
-# Hosts that reach the server itself or cloud metadata. The agent resolves
-# names and checks the addresses too; this catches the obvious ones early.
-_BLOCKED_HOSTS = ("localhost", "metadata", "metadata.google.internal")
+# Cloud metadata services hand out the server's cloud credentials. The
+# agent resolves names and checks the addresses too; this catches the
+# obvious ones early. The server's own localhost is fine (a database
+# installed alongside).
+_BLOCKED_HOSTS = ("metadata", "metadata.google.internal")
 
 
 def check_external_host(host: str) -> None:
     name = host.strip("[]").lower().rstrip(".")
-    if name in _BLOCKED_HOSTS or name.endswith(".localhost"):
-        raise DbError(
-            422, f"{host} points at the server itself; use a managed database"
-        )
+    if name in _BLOCKED_HOSTS:
+        raise DbError(422, f"{host} isn't allowed: it's a cloud metadata service")
     try:
         address = ipaddress.ip_address(name)
     except ValueError:
@@ -242,15 +242,13 @@ def check_external_host(host: str) -> None:
     if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
         address = address.ipv4_mapped
     if (
-        address.is_loopback
-        or address.is_link_local
+        address.is_link_local
         or address.is_unspecified
         or address.is_multicast
-        or address.is_reserved
+        or (address.is_reserved and not address.is_loopback)
     ):
         raise DbError(
-            422,
-            f"{host} isn't allowed: it reaches the server itself or cloud metadata",
+            422, f"{host} isn't allowed: link-local addresses reach cloud metadata"
         )
 
 

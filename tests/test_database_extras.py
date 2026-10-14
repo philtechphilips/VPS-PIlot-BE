@@ -53,12 +53,15 @@ def external(client, headers, server=None, **extra):
 # ---------------------------------------------------------------------------
 
 
-def test_external_hosts_on_the_server_are_refused(client, admin_headers):
+def test_metadata_and_link_local_hosts_are_refused(client, admin_headers):
     server = enrolled_agent(client, admin_headers, name="ext")
-    for host in ("127.0.0.1", "localhost", "169.254.169.254", "[::1]", "0.0.0.0",
-                 "metadata.google.internal", "app.localhost"):  # fmt: skip
+    for host in ("169.254.169.254", "[fe80::1]", "0.0.0.0", "224.0.0.1",
+                 "metadata.google.internal"):  # fmt: skip
         response, _ = external(client, admin_headers, server, host=host)
         assert response.status_code == 422, host
+    # A database installed on the server itself is fine.
+    response, _ = external(client, admin_headers, server, host="127.0.0.1")
+    assert response.status_code == 202
 
 
 def test_agent_resolves_and_refuses_internal_addresses(monkeypatch):
@@ -67,9 +70,11 @@ def test_agent_resolves_and_refuses_internal_addresses(monkeypatch):
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 0)) for ip in addresses
         ]
 
-    monkeypatch.setattr(socket, "getaddrinfo", fake(["127.0.0.1"]))
+    monkeypatch.setattr(socket, "getaddrinfo", fake(["169.254.169.254"]))
     with pytest.raises(Rejected, match="isn't allowed"):
         agent_db.guard_host("sneaky.example.com")
+    monkeypatch.setattr(socket, "getaddrinfo", fake(["127.0.0.1"]))
+    assert agent_db.guard_host("localhost") == "127.0.0.1"
     monkeypatch.setattr(socket, "getaddrinfo", fake(["10.0.0.5", "169.254.169.254"]))
     with pytest.raises(Rejected):
         agent_db.guard_host("mixed.example.com")
@@ -77,7 +82,7 @@ def test_agent_resolves_and_refuses_internal_addresses(monkeypatch):
     assert agent_db.guard_host("db.internal.example") == "10.0.0.5"
     assert agent_db.guard_host("10.0.0.5") is None
     with pytest.raises(Rejected):
-        agent_db.guard_host("::ffff:127.0.0.1")
+        agent_db.guard_host("::ffff:169.254.169.254")
 
 
 def test_tls_settings_reach_the_agent(client, admin_headers, db: Session):

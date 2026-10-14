@@ -67,8 +67,8 @@ CA_PATH = "/vp-ca.pem"
 CA_RE = re.compile(
     r"(-----BEGIN CERTIFICATE-----\r?\n[A-Za-z0-9+/=\r\n]+-----END CERTIFICATE-----\s*)+"
 )
-# Names that reach the server itself or cloud metadata services.
-BLOCKED_NAMES = ("localhost", "metadata.google.internal", "metadata")
+# Cloud metadata services (which hand out the server's cloud credentials).
+BLOCKED_NAMES = ("metadata.google.internal", "metadata")
 
 PG_NULL = "\\N"  # how psql prints NULL, so it differs from ''
 MAX_ROWS = 1000
@@ -166,12 +166,13 @@ def _target(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def guard_host(host: str) -> str | None:
-    """Resolve an external database host and refuse addresses on this server
-    or link-local ones (cloud metadata): the agent must not become a way to
-    probe them. Returns the address to pin (None for a literal IP)."""
+    """Resolve an external database host and refuse link-local addresses
+    (cloud metadata) and other non-routable ones: the agent must not become
+    a way to reach them. The server's own localhost is allowed (databases
+    installed alongside). Returns the address to pin (None for a literal)."""
     name = host.strip("[]").lower().rstrip(".")
-    if name in BLOCKED_NAMES or name.endswith(".localhost"):
-        raise Rejected(f"{host} points at this server; use a managed database instead")
+    if name in BLOCKED_NAMES:
+        raise Rejected(f"{host} isn't allowed: it's a cloud metadata service")
     try:
         literal = ipaddress.ip_address(name)
     except ValueError:
@@ -188,16 +189,14 @@ def guard_host(host: str) -> str | None:
         if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
             address = address.ipv4_mapped
         if (
-            address.is_loopback
-            or address.is_link_local
+            address.is_link_local
             or address.is_unspecified
             or address.is_multicast
-            or address.is_reserved
+            or (address.is_reserved and not address.is_loopback)
         ):
             raise Rejected(
                 f"{host} resolves to {address}, which isn't allowed for external "
-                "databases (it reaches this server or cloud metadata). Use a "
-                "managed database, or the database's own address."
+                "databases (link-local addresses reach cloud metadata)."
             )
     return None if literal is not None else str(addresses[0])
 
