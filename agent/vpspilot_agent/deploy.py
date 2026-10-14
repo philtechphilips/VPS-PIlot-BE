@@ -432,6 +432,13 @@ def _healthy(
             last = str(getattr(error, "reason", error))
         time.sleep(2)
     emit("error", f"Health check failed after {timeout}s ({last or 'no response'})")
+    if last.startswith("HTTP 4"):
+        # It's running and answering, just not on that path.
+        emit(
+            "warn",
+            f"The app is up but answers {last} on {path}. Set the health check path "
+            "in the app's settings to a route that returns 200, such as /health.",
+        )
     return False
 
 

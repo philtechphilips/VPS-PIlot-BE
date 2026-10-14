@@ -732,7 +732,8 @@ def _release(
         if not healthy:
             _journal(candidate, emit, redact)
             raise d.Failed(
-                "The new version failed its health check (does it listen on $PORT?); "
+                "The new version failed its health check (see above: it must listen on "
+                "$PORT and answer the health check path with a 2xx or 3xx); "
                 "the live version is unchanged"
             )
     finally:
