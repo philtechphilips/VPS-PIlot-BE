@@ -246,3 +246,21 @@ def test_removed_targets_close_their_alerts(client, admin_headers, db: Session):
     service.evaluate(db, NOW)
     assert open_alerts(client, admin_headers) == []
     assert db.query(Application).count() == 0
+
+
+def test_threshold_limits_follow_the_rule_kind(client, admin_headers):
+    rules = "/api/v1/monitoring/rules"
+    pct = client.post(
+        rules, json={"kind": "cpu_high", "threshold": 150}, headers=admin_headers
+    )
+    assert pct.status_code == 422
+    weekly = client.post(
+        rules, json={"kind": "backup_stale", "threshold": 168}, headers=admin_headers
+    )
+    assert weekly.status_code == 201, weekly.text
+    edited = client.patch(
+        f"{rules}/{weekly.json()['id']}",
+        json={"threshold": 200, "name": "Weekly"},
+        headers=admin_headers,
+    )
+    assert edited.status_code == 200 and edited.json()["threshold"] == 200

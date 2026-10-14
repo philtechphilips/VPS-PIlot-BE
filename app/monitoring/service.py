@@ -108,10 +108,22 @@ def list_rules(db: Session) -> list[AlertRule]:
     )
 
 
+def _check_threshold(spec: Kind, value: float | None) -> None:
+    """Percentages stay under 100; days (certificates) and hours (backups)
+    can be larger."""
+    if value is None:
+        return
+    if spec.threshold is None:
+        raise RuleError(422, "This rule has no threshold")
+    if spec.metric and value >= 100:
+        raise RuleError(422, "A percentage threshold must be below 100")
+
+
 def create_rule(db: Session, data: dict[str, Any]) -> AlertRule:
     spec = KINDS.get(data["kind"])
     if spec is None:
         raise RuleError(422, "Unknown rule type")
+    _check_threshold(spec, data.get("threshold"))
     if spec.threshold is not None and data.get("threshold") is None:
         raise RuleError(422, "This rule needs a threshold")
     if data.get("server_id") and spec.target != "server":
@@ -137,6 +149,7 @@ def create_rule(db: Session, data: dict[str, Any]) -> AlertRule:
 
 def update_rule(db: Session, rule: AlertRule, data: dict[str, Any]) -> AlertRule:
     spec = KINDS[rule.kind]
+    _check_threshold(spec, data.get("threshold"))
     for field in ("name", "duration_minutes", "severity", "enabled", "notify_email"):
         if data.get(field) is not None:
             setattr(rule, field, data[field])

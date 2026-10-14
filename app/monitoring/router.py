@@ -42,7 +42,7 @@ class RuleCreate(BaseModel):
     name: (
         Annotated[str, StringConstraints(strip_whitespace=True, max_length=100)] | None
     ) = None
-    threshold: Annotated[float, Field(gt=0, lt=100)] | None = None
+    threshold: Annotated[float, Field(gt=0, le=10_000)] | None = None
     duration_minutes: Annotated[int, Field(ge=1, le=1440)] | None = None
     severity: Severity | None = None
     notify_email: bool = True
@@ -56,7 +56,7 @@ class RuleUpdate(BaseModel):
         ]
         | None
     ) = None
-    threshold: Annotated[float, Field(gt=0, lt=100)] | None = None
+    threshold: Annotated[float, Field(gt=0, le=10_000)] | None = None
     duration_minutes: Annotated[int, Field(ge=1, le=1440)] | None = None
     severity: Severity | None = None
     enabled: bool | None = None
@@ -203,7 +203,10 @@ def update_rule(
     rule_id: str, body: RuleUpdate, request: Request, db: DbSession, user: AdminUser
 ):
     data = body.model_dump(exclude_unset=True)
-    rule = service.update_rule(db, _get_rule(db, rule_id), data)
+    try:
+        rule = service.update_rule(db, _get_rule(db, rule_id), data)
+    except service.RuleError as error:
+        _raise(error)
     _audit_rule(
         db,
         user,
