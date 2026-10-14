@@ -98,7 +98,9 @@ def _get_rule(db, rule_id: str) -> AlertRule:
 
 
 @router.get("/fleet")
-def fleet(db: DbSession, _: AdminUser, range: Literal["1h", "24h", "7d", "30d", "90d"] = "1h"):  # noqa: A002
+def fleet(
+    db: DbSession, _: AdminUser, range: Literal["1h", "24h", "7d", "30d", "90d"] = "1h"
+):  # noqa: A002
     """Per-server metric series for the fleet charts, plus a summary."""
     rows = []
     for server in (
