@@ -1156,6 +1156,32 @@ def on_job_finished(db: Session, job: Job) -> None:
         _admin_finished(db, instance, job, ok, action)
 
 
+def _update_app_url(
+    db: Session, instance: DatabaseInstance, credential: DatabaseCredential
+) -> None:
+    if not (credential.application_id and credential.env_key):
+        return
+    app = db.get(Application, credential.application_id)
+    if app is None or not any(e["key"] == credential.env_key for e in app.env or []):
+        return
+    from app.apps import service as apps
+
+    url = connection_url(
+        instance, credential.username, _dec(credential.password), credential.database
+    )
+    app.env = apps.encode_env(
+        [
+            {
+                "key": e["key"],
+                "value": url if e["key"] == credential.env_key else None,
+                "secret": e["secret"],
+            }
+            for e in app.env or []
+        ],
+        app.env or [],
+    )
+
+
 def _admin_finished(
     db: Session,
     instance: DatabaseInstance,
@@ -1197,6 +1223,8 @@ def _admin_finished(
         if ok and credential.pending_password:
             credential.password = credential.pending_password
             credential.rotated_at = _now()
+            # The attached app gets the new URL (used from its next deploy).
+            _update_app_url(db, instance, credential)
         credential.pending_password = None
     elif action == "drop_user" and ok:
         for stale in db.scalars(

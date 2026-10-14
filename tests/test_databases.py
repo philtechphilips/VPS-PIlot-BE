@@ -242,6 +242,17 @@ def test_attach_postgres_to_app(client, admin_headers, db: Session):
     env = apps.env_values(stored)
     assert env["DATABASE_URL"] == f"postgresql://shop:{password}@vpdb-main:5432/shop"
     assert next(e for e in stored.env if e["key"] == "DATABASE_URL")["secret"] is True
+    # Rotating the app's password updates its DATABASE_URL too.
+    login = db.query(DatabaseCredential).filter_by(username="shop").one()
+    client.post(f"{DB}/{instance['id']}/users/{login.id}/rotate", headers=admin_headers)
+    rotate = claim(client, agent)
+    new_password = secrets_for(client, agent, rotate["id"])["new_password"]
+    finish(client, agent, rotate["id"], output={"ok": True})
+    db.refresh(stored)
+    assert new_password != password
+    assert apps.env_values(stored)["DATABASE_URL"] == (
+        f"postgresql://shop:{new_password}@vpdb-main:5432/shop"
+    )
     # Only once per variable, and only on the database's own server.
     assert (
         client.post(
