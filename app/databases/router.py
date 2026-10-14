@@ -318,7 +318,7 @@ def explore(instance_id: str, body: ExploreIn, db: DbSession, user: AdminUser):
     instance = _get(db, instance_id)
     if instance.engine == "redis":
         raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY, "Use the key browser for Redis"
+            status.HTTP_422_UNPROCESSABLE_CONTENT, "Use the key browser for Redis"
         )
     actor, label = audit.user_actor(user)
     try:
@@ -374,7 +374,7 @@ def drop_database(
     instance = _get(db, instance_id)
     if not service.IDENT_RE.fullmatch(name):
         raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY, "Invalid database name"
+            status.HTTP_422_UNPROCESSABLE_CONTENT, "Invalid database name"
         )
     actor, label = audit.user_actor(user)
     try:
@@ -441,7 +441,7 @@ def drop_user(
 ):
     instance = _get(db, instance_id)
     if not service.IDENT_RE.fullmatch(username):
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Invalid user name")
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Invalid user name")
     actor, label = audit.user_actor(user)
     try:
         return _job(service.drop_user(db, instance, username, actor, label, request))

@@ -237,7 +237,26 @@ class DbRedisPayload(DbJob):
     ) = None
 
 
+class LogsReadPayload(Strict):
+    """Read the systemd journal or a container's output (Logs page)."""
+
+    source: Literal["journal", "container"]
+    unit: (
+        Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9@._:-]{1,200}$")] | None
+    ) = None
+    container: Container | None = None
+    lines: Annotated[int, Field(ge=1, le=1000)] = 200
+    since: Since | None = None  # container
+    cursor: (
+        Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9=;_-]{1,512}$")] | None
+    ) = None  # journal
+    priority: Annotated[int, Field(ge=0, le=7)] | None = (
+        None  # journal: this level or more severe
+    )
+
+
 JOB_TYPES: dict[str, type[Strict]] = {
+    "logs.read": LogsReadPayload,
     "db.create": DbCreatePayload,
     "db.remove": DbRemovePayload,
     "db.control": DbControlPayload,

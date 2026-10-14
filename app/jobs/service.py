@@ -26,6 +26,7 @@ RUN_TIMEOUTS = {"app.deploy": timedelta(minutes=25), "db.create": timedelta(minu
 LONGEST_TIMEOUT = max([RUN_TIMEOUT, *RUN_TIMEOUTS.values()])
 MAX_OUTPUT = 64 * 1024
 MAX_EVENTS_PER_JOB = 500
+READ_ONLY_TYPES = {"app.logs", "logs.read", "db.query", "db.explore", "db.redis"}
 
 
 class JobError(Exception):
@@ -172,7 +173,11 @@ def list_jobs(db: Session, server_id: str | None = None, limit: int = 30) -> lis
     query = (
         select(Job)
         # Database reads (queries, browsing) are as frequent as log reads.
-        .where(Job.type.not_in(("app.logs", "db.query", "db.explore", "db.redis")))
+        .where(
+            Job.type.not_in(
+                ("app.logs", "logs.read", "db.query", "db.explore", "db.redis")
+            )
+        )
         .order_by(Job.created_at.desc(), Job.id)
         .limit(limit)
     )
@@ -287,6 +292,12 @@ def complete(
     job.result = result or {}
     for hook in on_finished:
         hook(db, job)
+    if job.type in READ_ONLY_TYPES:
+        # Polled reads (logs, browsing): the request is audited, not every
+        # completion, or the audit log would fill with refreshes.
+        db.commit()
+        db.refresh(job)
+        return job
     audit.record(
         db,
         action=f"job.{job.type}",

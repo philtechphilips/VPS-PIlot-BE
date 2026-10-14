@@ -11,6 +11,7 @@ from app.core.config import settings
 from app.databases.router import router as databases_router
 from app.github.router import router as github_router
 from app.jobs.router import router as jobs_router
+from app.logs.router import router as logs_router
 from app.monitoring import worker as monitoring_worker
 from app.monitoring.router import router as monitoring_router
 from app.notifications.router import router as notifications_router
@@ -56,6 +57,7 @@ app.include_router(github_router)
 app.include_router(notifications_router)
 app.include_router(monitoring_router)
 app.include_router(databases_router)
+app.include_router(logs_router)
 
 
 @app.get("/")
