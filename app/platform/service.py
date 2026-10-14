@@ -51,3 +51,75 @@ def webhook_base(db: Session) -> str | None:
 
 def version() -> str:
     return __version__
+
+
+def recovery_kit(db: Session, by: str) -> str:
+    """Everything needed to read VPSPilot's encrypted data without this
+    control plane: the master keys and the backup key, with instructions."""
+    from app.backups import service as backups
+    from app.core.security import decrypt_secret
+
+    row = get(db)
+    now = datetime.now(UTC)
+    backup_key = decrypt_secret(
+        backups.get_settings(db).encryption_key, backups.PURPOSE
+    )
+    previous = [
+        k.strip() for k in settings.encryption_keys_previous.split(",") if k.strip()
+    ]
+    master = settings.encryption_key
+    lines = [
+        "VPSPilot recovery kit",
+        "=====================",
+        f"Control plane: {row.name} ({row.public_url or settings.agent_api_url})",
+        f"Created: {now:%Y-%m-%d %H:%M} UTC by {by}",
+        "",
+        "Keep this file offline (a password manager or a printed copy in a safe).",
+        "Anyone holding it can decrypt the secrets VPSPilot stores and your backups.",
+        "",
+        "1. Control plane keys",
+        "---------------------",
+        "Stored secrets (env vars, tokens, database passwords) are encrypted with",
+        "these. Put them in the control plane's .env when reinstalling, together",
+        "with a restored copy of its database.",
+        "",
+    ]
+    if master:
+        lines.append(f"ENCRYPTION_KEY={master}")
+    else:
+        lines += [
+            "ENCRYPTION_KEY is not set: SECRET_KEY encrypts the secrets.",
+            f"SECRET_KEY={settings.secret_key}",
+        ]
+    if previous:
+        lines.append(f"ENCRYPTION_KEYS_PREVIOUS={','.join(previous)}")
+    if master:
+        lines.append(f"SECRET_KEY={settings.secret_key}")
+    lines += [
+        "",
+        "2. Backup key",
+        "-------------",
+        "Every database backup is encrypted with this key (AES-256-CBC, PBKDF2,",
+        "100000 iterations) before it leaves the server.",
+        "",
+        f"VPB_KEY={backup_key}",
+        "",
+        "Decrypt a backup by hand (OpenSSL 1.1.1 or newer):",
+        "",
+        f"  export VPB_KEY={backup_key}",
+        "  # PostgreSQL (*.pgdump.enc):",
+        "  openssl enc -d -aes-256-cbc -pbkdf2 -iter 100000 -pass env:VPB_KEY \\",
+        "    -in backup.pgdump.enc | pg_restore --no-owner -d DATABASE",
+        "  # MySQL / MariaDB (*.sql.gz.enc):",
+        "  openssl enc -d -aes-256-cbc -pbkdf2 -iter 100000 -pass env:VPB_KEY \\",
+        "    -in backup.sql.gz.enc | gunzip | mysql DATABASE",
+        "  # Redis (*.rdb.gz.enc): gives dump.rdb",
+        "  openssl enc -d -aes-256-cbc -pbkdf2 -iter 100000 -pass env:VPB_KEY \\",
+        "    -in backup.rdb.gz.enc | gunzip > dump.rdb",
+        "",
+        "If you rotate ENCRYPTION_KEY, download a new kit.",
+        "",
+    ]
+    row.recovery_kit_at = now
+    db.commit()
+    return "\n".join(lines)

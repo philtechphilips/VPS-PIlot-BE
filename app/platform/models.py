@@ -17,3 +17,5 @@ class PlatformSettings(Base):
     # When set it's what agents, install commands and webhooks use.
     public_url: Mapped[str | None] = mapped_column(String(300))
     updated_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    # Last time someone downloaded the encryption-key recovery kit.
+    recovery_kit_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))

@@ -76,3 +76,32 @@ def test_enrollment_tokens_list_and_revoke(client, admin_headers):
         == 204
     )
     assert client.get("/api/v1/servers/enrollments", headers=admin_headers).json() == []
+
+
+def test_recovery_kit_needs_the_password_and_is_audited(
+    client, admin_headers, user_headers, db
+):
+    from app.audit.models import AuditLog
+    from app.backups import service as backups
+    from app.core.security import decrypt_secret
+
+    url = "/api/v1/platform/recovery-kit"
+    assert (
+        client.post(url, json={"password": "x"}, headers=user_headers).status_code
+        == 403
+    )
+    wrong = client.post(url, json={"password": "wrong-password"}, headers=admin_headers)
+    assert wrong.status_code == 403
+    kit = client.post(url, json={"password": PASSWORD}, headers=admin_headers)
+    assert kit.status_code == 200
+    assert "attachment" in kit.headers["content-disposition"]
+    assert kit.headers["cache-control"] == "no-store"
+    key = decrypt_secret(backups.get_settings(db).encryption_key, backups.PURPOSE)
+    assert f"VPB_KEY={key}" in kit.text
+    assert "SECRET_KEY=" in kit.text and "pg_restore" in kit.text
+    results = [
+        a.result for a in db.query(AuditLog).filter_by(action="platform.recovery_kit")
+    ]
+    assert sorted(results) == ["denied", "success"]
+    platform = client.get("/api/v1/platform", headers=admin_headers).json()
+    assert platform["recovery_kit_at"] is not None

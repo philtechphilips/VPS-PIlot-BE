@@ -1,6 +1,7 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request, status
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, StringConstraints
 from sqlalchemy import text
 
@@ -8,6 +9,7 @@ from app.agent_version import AGENT_VERSION
 from app.audit import service as audit
 from app.auth.dependencies import AdminUser
 from app.core.database import DbSession
+from app.core.security import verify_password
 from app.platform import service
 
 router = APIRouter(prefix="/api/v1/platform", tags=["Platform"])
@@ -52,6 +54,7 @@ def _out(db, row) -> dict:
         "agent_version": AGENT_VERSION,
         "schema": _schema(db),
         "updated_at": row.updated_at,
+        "recovery_kit_at": row.recovery_kit_at,
     }
 
 
@@ -79,3 +82,34 @@ def put_platform(body: PlatformIn, request: Request, db: DbSession, user: AdminU
         request=request,
     )
     return _out(db, row)
+
+
+class RecoveryKitIn(BaseModel):
+    password: Annotated[str, StringConstraints(min_length=1, max_length=128)]
+
+
+@router.post("/recovery-kit", response_class=PlainTextResponse)
+def recovery_kit(body: RecoveryKitIn, request: Request, db: DbSession, user: AdminUser):
+    """The keys that decrypt stored secrets and backups, as a text file.
+    Asks for the password again; every download is audited."""
+    valid, _ = verify_password(body.password, user.password)
+    actor, label = audit.user_actor(user)
+    if not valid:
+        audit.record(
+            db, action="platform.recovery_kit", result="denied", actor=actor,
+            actor_label=label, target_type="platform", target_id="1",
+            detail="wrong password", request=request,
+        )  # fmt: skip
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "That password isn't right")
+    kit = service.recovery_kit(db, label)
+    audit.record(
+        db, action="platform.recovery_kit", result="success", actor=actor,
+        actor_label=label, target_type="platform", target_id="1", request=request,
+    )  # fmt: skip
+    return PlainTextResponse(
+        kit,
+        headers={
+            "Content-Disposition": 'attachment; filename="vpspilot-recovery-kit.txt"',
+            "Cache-Control": "no-store",
+        },
+    )
