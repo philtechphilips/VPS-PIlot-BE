@@ -10,6 +10,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import PlainTextResponse, Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel, Field, StringConstraints
 from sqlalchemy import select
 
 from app.apps import service as apps
@@ -170,6 +171,30 @@ def job_secrets(job_id: str, agent: Agent, db: DbSession):
         if token:
             reply["git_token"] = token
     return reply
+
+
+class RequestRow(BaseModel):
+    host: Annotated[str, StringConstraints(max_length=253)]
+    minute: Annotated[int, Field(ge=0)]
+    requests: Annotated[int, Field(ge=0)]
+    s2xx: Annotated[int, Field(ge=0)]
+    s3xx: Annotated[int, Field(ge=0)]
+    s4xx: Annotated[int, Field(ge=0)]
+    s5xx: Annotated[int, Field(ge=0)]
+    bytes: Annotated[int, Field(ge=0)]
+    p50_ms: Annotated[float, Field(ge=0)]
+    p95_ms: Annotated[float, Field(ge=0)]
+
+
+class RequestsReport(BaseModel):
+    rows: Annotated[list[RequestRow], Field(max_length=2000)]
+
+
+@router.post("/v1/requests", status_code=status.HTTP_202_ACCEPTED)
+def report_requests(body: RequestsReport, agent: Agent, db: DbSession):
+    """Per-site request counts from the proxy's access log."""
+    stored = apps.store_requests(db, agent, [r.model_dump() for r in body.rows])
+    return {"stored": stored}
 
 
 @router.put("/v1/jobs/{job_id}/artifact", status_code=status.HTTP_202_ACCEPTED)

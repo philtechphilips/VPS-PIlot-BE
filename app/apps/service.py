@@ -10,7 +10,7 @@ from typing import Any
 from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.orm import Session
 
-from app.apps.models import Application, Deployment
+from app.apps.models import Application, Deployment, RequestMetric
 from app.audit import service as audit
 from app.core.security import decrypt_secret, encrypt_secret, new_id
 from app.github import service as github
@@ -723,3 +723,114 @@ jobs.on_finished.append(on_job_finished)
 
 def job_for(db: Session, deployment: Deployment) -> Job | None:
     return db.get(Job, deployment.job_id) if deployment.job_id else None
+
+
+# ---------------------------------------------------------------------------
+# Request metrics (from the proxy's access log)
+# ---------------------------------------------------------------------------
+
+REQUEST_RETENTION = timedelta(days=7)
+
+
+def store_requests(db: Session, server: Server, rows: list[dict[str, Any]]) -> int:
+    """Add per-minute counts for the server's domains (rows for hosts it
+    doesn't serve are ignored). A minute split across two reads is merged."""
+    from app.domains.models import Domain
+
+    domains = {
+        d.hostname: d
+        for d in db.scalars(select(Domain).where(Domain.server_id == server.id))
+    }
+    stored = 0
+    for row in rows:
+        domain = domains.get(row["host"])
+        if domain is None:
+            continue
+        minute = datetime.fromtimestamp(row["minute"], UTC)
+        existing = db.scalar(
+            select(RequestMetric).where(
+                RequestMetric.host == row["host"], RequestMetric.minute == minute
+            )
+        )
+        if existing is None:
+            existing = RequestMetric(
+                server_id=server.id,
+                host=row["host"],
+                application_id=domain.application_id,
+                minute=minute,
+                requests=0, s2xx=0, s3xx=0, s4xx=0, s5xx=0, bytes=0,
+                p50_ms=0.0, p95_ms=0.0,
+            )  # fmt: skip
+            db.add(existing)
+        for field in ("requests", "s2xx", "s3xx", "s4xx", "s5xx", "bytes"):
+            setattr(existing, field, (getattr(existing, field) or 0) + row[field])
+        # Percentiles can't be merged exactly; keep the worse one.
+        existing.p50_ms = max(existing.p50_ms or 0, row["p50_ms"])
+        existing.p95_ms = max(existing.p95_ms or 0, row["p95_ms"])
+        stored += 1
+    db.execute(
+        delete(RequestMetric)
+        .where(RequestMetric.minute < _now() - REQUEST_RETENTION)
+        .execution_options(synchronize_session=False)
+    )
+    db.commit()
+    return stored
+
+
+REQUEST_RANGES = {
+    "1h": timedelta(hours=1),
+    "24h": timedelta(hours=24),
+    "7d": timedelta(days=7),
+}
+
+
+def request_series(
+    db: Session, app: Application, range_key: str, points: int = 60
+) -> dict[str, Any]:
+    span = REQUEST_RANGES[range_key]
+    since = _now() - span
+    rows = list(
+        db.scalars(
+            select(RequestMetric)
+            .where(
+                RequestMetric.application_id == app.id, RequestMetric.minute >= since
+            )
+            .order_by(RequestMetric.minute)
+        )
+    )
+    bucket = span / points
+    series: list[dict[str, Any]] = []
+    for i in range(points):
+        start = since + bucket * i
+        series.append(
+            {"ts": (start + bucket).isoformat(), "requests": 0, "s4xx": 0, "s5xx": 0,
+             "p95_ms": 0.0, "bytes": 0}
+        )  # fmt: skip
+    totals = {"requests": 0, "s2xx": 0, "s3xx": 0, "s4xx": 0, "s5xx": 0, "bytes": 0}
+    p95: list[float] = []
+    for row in rows:
+        minute = row.minute if row.minute.tzinfo else row.minute.replace(tzinfo=UTC)
+        point = series[min(points - 1, int((minute - since) / bucket))]
+        point["requests"] += row.requests
+        point["s4xx"] += row.s4xx
+        point["s5xx"] += row.s5xx
+        point["bytes"] += row.bytes
+        point["p95_ms"] = max(point["p95_ms"], row.p95_ms)
+        for field in totals:
+            totals[field] += getattr(row, field)
+        p95.append(row.p95_ms)
+    minutes = span.total_seconds() / 60
+    return {
+        "points": series,
+        "totals": {
+            **totals,
+            "per_minute": round(totals["requests"] / minutes, 2),
+            "error_rate": round(totals["s5xx"] / totals["requests"], 4)
+            if totals["requests"]
+            else 0,
+            "p95_ms": round(sorted(p95)[int(0.95 * (len(p95) - 1))], 2)
+            if p95
+            else None,
+        },
+        "hosts": sorted({r.host for r in rows}),
+    }

@@ -6,8 +6,10 @@ from sqlalchemy import (
     TIMESTAMP,
     BigInteger,
     Boolean,
+    Float,
     ForeignKey,
     Index,
+    Integer,
     String,
     Text,
     func,
@@ -102,3 +104,31 @@ class Deployment(Base):
     # Snapshot of how it was run (ports, health check) for the record
     spec: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     notes: Mapped[str | None] = mapped_column(Text)
+
+
+class RequestMetric(Base):
+    """Requests to one site in one minute, from the proxy's access log."""
+
+    __tablename__ = "request_metrics"
+    __table_args__ = (
+        Index("request_metrics_host_minute_idx", "host", "minute", unique=True),
+        Index("request_metrics_application_id_minute_idx", "application_id", "minute"),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True
+    )
+    server_id: Mapped[str] = mapped_column(String(32))
+    host: Mapped[str] = mapped_column(String(253))
+    application_id: Mapped[str | None] = mapped_column(
+        ForeignKey("applications.id", ondelete="CASCADE")
+    )
+    minute: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    requests: Mapped[int]
+    s2xx: Mapped[int]
+    s3xx: Mapped[int]
+    s4xx: Mapped[int]
+    s5xx: Mapped[int]
+    bytes: Mapped[int] = mapped_column(BigInteger)
+    p50_ms: Mapped[float] = mapped_column(Float)
+    p95_ms: Mapped[float] = mapped_column(Float)

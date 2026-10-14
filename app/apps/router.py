@@ -298,3 +298,14 @@ def read_logs(app_id: str, job_id: str, db: DbSession, _: AdminUser):
         return service.read_logs(db, app, job_id)
     except service.AppError as error:
         _raise(error)
+
+
+@router.get("/applications/{app_id}/requests")
+def app_requests(
+    app_id: str,
+    db: DbSession,
+    _: AdminUser,
+    range: Annotated[str, Query(pattern="^(1h|24h|7d)$")] = "24h",  # noqa: A002
+):
+    """Traffic through the app's domains: requests, errors, p95 latency."""
+    return service.request_series(db, _get_app(db, app_id), range)

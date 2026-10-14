@@ -113,6 +113,9 @@ def render(
             scheme = "http" if site["tls"] == "off" else "https"
             lines.append(f"\tredir {scheme}://{site['redirect_to']}{{uri}} permanent")
         else:
+            # Access log (JSON on stderr, rotated by Docker) for request
+            # metrics; Caddy redacts cookies and auth headers.
+            lines += ["\tlog {", "\t\toutput stderr", "\t\tformat json", "\t}"]
             lines.append("\tencode zstd gzip")
             upstream = site["upstream"]
             if upstream.startswith("host:"):
@@ -379,5 +382,81 @@ def status(args: dict[str, Any]) -> dict[str, Any]:
     return {"exit_code": 0, "output": json.dumps(body)}
 
 
-OPERATIONS = {"proxy.status": status}
+DOCKER_TS_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z")
+MAX_ACCESS_LINES = 500_000  # per read; the rest is picked up next time
+MAX_DURATIONS = 5_000  # per host and minute, for percentiles
+
+
+def _percentile(values: list[float], q: float) -> float:
+    ordered = sorted(values)
+    return ordered[min(len(ordered) - 1, int(q * len(ordered)))]
+
+
+def requests(args: dict[str, Any]) -> dict[str, Any]:
+    """Request counts per site and minute from the proxy's access log, since
+    `since` (a Docker log timestamp). Returns rows and the new cursor."""
+    import json
+
+    since = args.get("since")
+    if not isinstance(since, str) or not DOCKER_TS_RE.fullmatch(since):
+        raise Rejected("invalid since")
+    if not _running():
+        return {"exit_code": 0, "output": json.dumps({"until": since, "rows": []})}
+    proc = subprocess.Popen(
+        ["docker", "logs", "--timestamps", "--since", since, CONTAINER],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,  # Caddy logs to stderr
+        text=True,
+        errors="replace",
+    )
+    buckets: dict[tuple[str, int], dict[str, Any]] = {}
+    cursor = since
+    seen = 0
+    assert proc.stderr is not None
+    try:
+        for line in proc.stderr:
+            stamp, _, body = line.partition(" ")
+            if stamp <= since or '"http.log.access' not in body:
+                continue
+            seen += 1
+            if seen > MAX_ACCESS_LINES:
+                break
+            cursor = stamp
+            try:
+                entry = json.loads(body)
+                host = str(entry["request"]["host"]).split(":")[0].lower()
+                minute = int(float(entry["ts"])) // 60 * 60
+                status_code = int(entry.get("status") or 0)
+            except (ValueError, KeyError, TypeError):
+                continue
+            if not HOST_RE.fullmatch(host):
+                continue
+            row = buckets.setdefault(
+                (host, minute),
+                {"host": host, "minute": minute, "requests": 0, "s2xx": 0, "s3xx": 0,
+                 "s4xx": 0, "s5xx": 0, "bytes": 0, "durations": []},
+            )  # fmt: skip
+            row["requests"] += 1
+            klass = f"s{status_code // 100}xx"
+            if klass in row:
+                row[klass] += 1
+            row["bytes"] += int(entry.get("size") or 0)
+            if len(row["durations"]) < MAX_DURATIONS:
+                row["durations"].append(float(entry.get("duration") or 0) * 1000)
+    finally:
+        proc.kill()
+        proc.wait()
+    rows = []
+    for row in buckets.values():
+        durations = row.pop("durations")
+        row["p50_ms"] = round(_percentile(durations, 0.5), 2) if durations else 0
+        row["p95_ms"] = round(_percentile(durations, 0.95), 2) if durations else 0
+        rows.append(row)
+    return {
+        "exit_code": 0,
+        "output": json.dumps({"until": cursor, "rows": rows[:2000]}),
+    }
+
+
+OPERATIONS = {"proxy.status": status, "proxy.requests": requests}
 STREAMING = {"proxy.apply": apply}
