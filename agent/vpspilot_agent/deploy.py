@@ -13,6 +13,7 @@ argument lists; nothing goes through a shell.
 from __future__ import annotations
 
 import base64
+import json
 import os
 import re
 import shutil
@@ -725,6 +726,79 @@ def remove(args: dict[str, Any], emit: Emit) -> dict[str, Any]:
     shutil.rmtree(os.path.join(APPS_DIR, app), ignore_errors=True)
     emit("info", f"Removed {app}")
     return {"exit_code": 0, "output": f"Removed {app}"}
+
+
+SINCE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$")
+MAX_LOG_JSON = 60 * 1024  # stays under the control plane's output limit
+MAX_LOG_LINE = 2000
+
+
+def _ts_key(ts: str) -> str:
+    # Docker trims trailing zeros from the fraction; pad so strings sort.
+    head, dot, frac = ts.rstrip("Z").partition(".")
+    return f"{head}.{frac.ljust(9, '0')}"
+
+
+def app_logs(args: dict[str, Any]) -> dict[str, Any]:
+    """The app container's recent output as JSON:
+    {"state", "started_at", "restarts", "lines": [{"t", "s", "m"}]}."""
+    app = _match(APP_RE, args.get("app"), "app name")
+    lines = args.get("lines", 200)
+    if not isinstance(lines, int) or isinstance(lines, bool) or not 1 <= lines <= 1000:
+        raise Rejected("lines must be 1-1000")
+    since = args.get("since")
+    if since is not None:
+        _match(SINCE_RE, since, "since")
+    name = f"vp-{app}"
+    code, out = _run(
+        [
+            "docker",
+            "inspect",
+            "-f",
+            "{{.State.Status}}|{{.State.StartedAt}}|{{.RestartCount}}",
+            name,
+        ],
+        timeout=15,
+    )
+    if code != 0:
+        body = {"state": "missing", "started_at": None, "restarts": 0, "lines": []}
+        return {"exit_code": 0, "output": json.dumps(body)}
+    state, started, restarts = (out.strip().split("|") + ["", "", "0"])[:3]
+    cmd = ["docker", "logs", "--timestamps", "--tail", str(lines)]
+    if since:
+        cmd += ["--since", since]
+    try:
+        done = subprocess.run(
+            [*cmd, name],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=30,
+            check=False,
+            stdin=subprocess.DEVNULL,
+        )
+    except subprocess.TimeoutExpired:
+        return {"exit_code": 124, "output": "", "error": "Reading logs timed out"}
+    entries = []
+    # stdout and stderr come back separately; merge them by timestamp.
+    for stream, text in (("out", done.stdout), ("err", done.stderr)):
+        for line in text.splitlines():
+            ts, _, message = line.partition(" ")
+            if SINCE_RE.match(ts):
+                entries.append({"t": ts, "s": stream, "m": message[:MAX_LOG_LINE]})
+    entries.sort(key=lambda e: _ts_key(e["t"]))
+    entries = entries[-lines:]
+    body = {
+        "state": state,
+        "started_at": started or None,
+        "restarts": int(restarts) if restarts.isdigit() else 0,
+        "lines": entries,
+    }
+    text = json.dumps(body)
+    while len(text) > MAX_LOG_JSON and body["lines"]:
+        body["lines"] = body["lines"][len(body["lines"]) // 4 + 1 :]
+        text = json.dumps(body)
+    return {"exit_code": 0, "output": text}
 
 
 STREAMING: dict[str, Callable[[dict[str, Any], Emit], dict[str, Any]]] = {

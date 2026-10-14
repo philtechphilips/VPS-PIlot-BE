@@ -13,6 +13,8 @@ from app.apps.schemas import (
     DeploymentOut,
     DeployRequest,
     EnvOut,
+    LogsOut,
+    LogsRequest,
 )
 from app.audit import service as audit
 from app.auth.dependencies import AdminUser
@@ -258,3 +260,32 @@ def rollback_deployment(
     except service.AppError as error:
         _raise(error)
     return _deployment_out(db, deployment, app)
+
+
+@router.post(
+    "/applications/{app_id}/logs",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def request_logs(
+    app_id: str, body: LogsRequest, request: Request, db: DbSession, user: AdminUser
+):
+    """Ask the agent for the app's runtime output. Poll the returned job."""
+    app = _get_app(db, app_id)
+    actor, label = audit.user_actor(user)
+    try:
+        job = service.request_logs(
+            db, app, actor, label, body.lines, body.since, request
+        )
+    except service.AppError as error:
+        _raise(error)
+    return {"job_id": job.id}
+
+
+@router.get("/applications/{app_id}/logs/{job_id}", response_model=LogsOut)
+def read_logs(app_id: str, job_id: str, db: DbSession, _: AdminUser):
+    jobs.reap(db)
+    app = _get_app(db, app_id)
+    try:
+        return service.read_logs(db, app, job_id)
+    except service.AppError as error:
+        _raise(error)

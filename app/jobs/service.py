@@ -83,6 +83,7 @@ def create(
     actor_label: str,
     idempotency_key: str | None = None,
     request=None,
+    audited: bool = True,
 ) -> tuple[Job, bool]:
     """Queue a job. Returns (job, created); an existing job is returned when
     the idempotency key was already used for this server."""
@@ -128,6 +129,12 @@ def create(
         expires_at=_now() + QUEUE_TTL,
     )
     db.add(job)
+    if not audited:
+        # Read-only polling (e.g. following logs): the first request is
+        # audited by the caller, the refreshes aren't.
+        db.commit()
+        db.refresh(job)
+        return job, True
     audit.record(
         db,
         action=f"job.{job_type}",
@@ -149,7 +156,7 @@ def create(
 
 
 def _describe(job_type: str, payload: dict) -> str:
-    target = payload.get("unit") or payload.get("container") or ""
+    target = payload.get("unit") or payload.get("container") or payload.get("app") or ""
     return f"{job_type} {target}".strip()
 
 
@@ -159,7 +166,13 @@ def get(db: Session, job_id: str) -> Job | None:
 
 def list_jobs(db: Session, server_id: str | None = None, limit: int = 30) -> list[Job]:
     reap(db)
-    query = select(Job).order_by(Job.created_at.desc(), Job.id).limit(limit)
+    # Log reads are polled every few seconds; they'd drown the activity list.
+    query = (
+        select(Job)
+        .where(Job.type != "app.logs")
+        .order_by(Job.created_at.desc(), Job.id)
+        .limit(limit)
+    )
     if server_id:
         query = query.where(Job.server_id == server_id)
     return list(db.scalars(query))

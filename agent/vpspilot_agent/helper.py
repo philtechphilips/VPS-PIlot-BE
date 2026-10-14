@@ -131,6 +131,7 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "container.stop": _docker("stop"),
     "container.logs": _container_logs,
     "docker.ps": _docker_ps,
+    "app.logs": deploy.app_logs,
 }
 
 

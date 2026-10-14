@@ -2,11 +2,12 @@
 app's server; the job's outcome updates the deployment and, on success,
 promotes it to the app's current release."""
 
+import json
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.apps.models import Application, Deployment
@@ -14,7 +15,7 @@ from app.audit import service as audit
 from app.core.security import decrypt_secret, encrypt_secret, new_id
 from app.github import service as github
 from app.jobs import service as jobs
-from app.jobs.models import Job
+from app.jobs.models import Job, JobEvent
 from app.notifications import service as notifications
 from app.servers.models import Server
 
@@ -408,6 +409,68 @@ def deploy_from_push(db: Session, payload: dict[str, Any], request=None) -> int:
         )
         queued += 1
     return queued
+
+
+LOG_JOB_RETENTION = timedelta(hours=1)
+
+
+def request_logs(
+    db: Session,
+    app: Application,
+    actor: str,
+    label: str,
+    lines: int,
+    since: str | None,
+    request=None,
+) -> Job:
+    """Queue a read of the app's runtime logs. Only the first read of a
+    session is audited; follow-up refreshes (with `since`) aren't."""
+    server = db.get(Server, app.server_id)
+    # Log reads are frequent and disposable: drop old ones.
+    old = select(Job.id).where(
+        Job.type == "app.logs",
+        Job.finished_at.is_not(None),
+        Job.finished_at < _now() - LOG_JOB_RETENTION,
+    )
+    db.execute(delete(JobEvent).where(JobEvent.job_id.in_(old)))
+    db.execute(delete(Job).where(Job.id.in_(old)))
+    payload: dict[str, Any] = {"app": app.name, "lines": lines}
+    if since:
+        payload["since"] = since
+    try:
+        job, _ = jobs.create(
+            db,
+            server,
+            "app.logs",
+            payload,
+            actor,
+            label,
+            request=request,
+            audited=since is None,
+        )
+    except jobs.JobError as error:
+        raise AppError(error.status_code, error.detail) from None
+    return job
+
+
+def read_logs(db: Session, app: Application, job_id: str) -> dict[str, Any]:
+    job = db.get(Job, job_id)
+    if job is None or job.type != "app.logs" or job.payload.get("app") != app.name:
+        raise AppError(404, "Log request not found")
+    out: dict[str, Any] = {
+        "status": job.status,
+        "error": job.error,
+        "state": None,
+        "started_at": None,
+        "restarts": 0,
+        "lines": [],
+    }
+    if job.status == "succeeded":
+        try:
+            out.update(json.loads(jobs.job_output(job) or "{}"))
+        except ValueError:
+            out["error"] = "The agent returned unreadable logs"
+    return out
 
 
 def git_token(db: Session, app: Application) -> str | None:

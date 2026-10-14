@@ -25,6 +25,7 @@ SUPPORTED = {
     "container.logs",
     "app.deploy",
     "app.remove",
+    "app.logs",
 }
 # Long operations that stream progress from the helper.
 STREAMING = {"app.deploy", "app.remove"}
@@ -123,10 +124,11 @@ def run_job(client: Client, job: dict[str, Any], call: HelperCall = helper.call)
     if job_type in STREAMING:
         return _run_streaming(client, job, call, finish)
 
-    client.post(
-        f"{base}/events",
-        {"events": [{"level": "info", "message": f"Running {job_type}"}]},
-    )
+    if job_type != "app.logs":  # polled often; no progress needed
+        client.post(
+            f"{base}/events",
+            {"events": [{"level": "info", "message": f"Running {job_type}"}]},
+        )
     try:
         result = call(job_type, job.get("payload") or {})
     except OSError as error:

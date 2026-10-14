@@ -132,9 +132,24 @@ class AppRemovePayload(Strict):
     app: AppName
 
 
+Since = Annotated[
+    str,
+    StringConstraints(pattern=r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$"),
+]
+
+
+class AppLogsPayload(Strict):
+    """Read the running container's output (stdout + stderr)."""
+
+    app: AppName
+    lines: Annotated[int, Field(ge=1, le=1000)] = 200
+    since: Since | None = None
+
+
 JOB_TYPES: dict[str, type[Strict]] = {
     "app.deploy": AppDeployPayload,
     "app.remove": AppRemovePayload,
+    "app.logs": AppLogsPayload,
     "service.restart": ServicePayload,
     "service.start": ServicePayload,
     "service.stop": ServicePayload,

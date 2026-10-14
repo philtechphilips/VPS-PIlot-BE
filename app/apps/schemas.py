@@ -14,6 +14,7 @@ from app.jobs.types import (
     Memory,
     Port,
     RelPath,
+    Since,
 )
 
 
@@ -80,6 +81,27 @@ class AppUpdate(BaseModel):
 class DeployRequest(BaseModel):
     # A branch, tag or commit for Git apps; an image reference for image apps.
     ref: GitRef | ImageRef | None = None
+
+
+class LogsRequest(BaseModel):
+    lines: Annotated[int, Field(ge=1, le=1000)] = 200
+    # Only lines after this timestamp (for following); RFC 3339, UTC.
+    since: Since | None = None
+
+
+class LogLine(BaseModel):
+    t: str  # timestamp
+    s: Literal["out", "err"]
+    m: str
+
+
+class LogsOut(BaseModel):
+    status: str  # job status: queued | running | succeeded | failed | expired
+    error: str | None
+    state: str | None  # container state: running, exited, restarting, missing
+    started_at: str | None
+    restarts: int
+    lines: list[LogLine]
 
 
 class EnvOut(BaseModel):
