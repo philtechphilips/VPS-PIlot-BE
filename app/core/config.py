@@ -41,6 +41,16 @@ class Settings(BaseSettings):
     # the subject), so the whole flow can be tested before a domain is verified.
     email_override_to: str | None = None
 
+    # Agents: the URL agents use to reach this API (what the install command
+    # contains). In the local Lima lab that is http://host.lima.internal:8000.
+    agent_api_url: str = "http://localhost:8000"
+    agent_heartbeat_seconds: int = 10
+    agent_metrics_seconds: int = 15
+    # A server is shown offline when no heartbeat arrived for this long.
+    agent_offline_after_seconds: int = 35
+    enrollment_token_expire_minutes: int = 15
+    metrics_retention_days: int = 7
+
     # Used to build links in emails, e.g. the password reset link
     frontend_url: str = "http://localhost:3000"
 
