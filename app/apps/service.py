@@ -79,6 +79,10 @@ def env_for_display(app: Application) -> list[dict[str, Any]]:
     ]
 
 
+def secret_keys(app: Application) -> list[str]:
+    return [e["key"] for e in app.env or [] if e["secret"]]
+
+
 def env_values(app: Application) -> dict[str, str]:
     """Plain values, only for handing to the agent running a deploy."""
     values = {e["key"]: decrypt_secret(e["value"], ENV_PURPOSE) for e in app.env or []}
@@ -255,7 +259,7 @@ def deploy(
         status="queued",
         trigger=trigger,
         requested_ref=requested,
-        created_by=actor,
+        created_by=label[:64],
         spec={},
         created_at=_now(),
     )
@@ -293,7 +297,7 @@ def rollback(
         commit_sha=target.commit_sha,
         commit_message=target.commit_message,
         rollback_of=target.id,
-        created_by=actor,
+        created_by=label[:64],
         spec={},
         created_at=_now(),
     )

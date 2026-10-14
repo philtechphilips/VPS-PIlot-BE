@@ -123,6 +123,7 @@ def test_secrets_only_for_the_running_job_on_its_agent(client, admin_headers, se
         "DATABASE_URL": "postgres://u:hunter2@db/x",
         "PORT": "3000",
     }
+    assert client.get(url, headers=agent).json()["secret_keys"] == ["DATABASE_URL"]
     complete(client, agent, job["id"])
     assert client.get(url, headers=agent).status_code == 404
 
@@ -268,6 +269,7 @@ def test_helper_revalidates_deploy_arguments():
         {"host_port": 22},
         {"env": {"A": "x\ny"}},
         {"env": {"BAD-KEY": "x"}},
+        {"secret_keys": ["NOT_IN_ENV"]},
         {"memory": "1t"},
     ]
     for extra in bad:
@@ -302,7 +304,7 @@ class StreamingClient:
 
     def get(self, path):
         self.calls.append((path, None))
-        return {"env": self.env}
+        return {"env": self.env, "secret_keys": ["TOKEN"]}
 
 
 def test_executor_streams_deploy_progress_and_reports_result():
@@ -330,6 +332,7 @@ def test_executor_streams_deploy_progress_and_reports_result():
     assert executor.run_job(client, job, call=fake_call) == "succeeded"
     assert seen["op"] == "app.deploy"
     assert seen["args"]["env"] == {"TOKEN": "s3cret-value", "PORT": "3000"}
+    assert seen["args"]["secret_keys"] == ["TOKEN"]
     assert "has_env" not in seen["args"]
 
     paths = [path for path, _ in client.calls]

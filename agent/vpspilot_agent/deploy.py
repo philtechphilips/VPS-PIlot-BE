@@ -110,6 +110,9 @@ def validate(args: dict[str, Any]) -> dict[str, Any]:
     timeout = args.get("health_timeout", 60)
     if not isinstance(timeout, int) or not 5 <= timeout <= 600:
         raise Rejected("invalid health timeout")
+    secret_keys = args.get("secret_keys") or []
+    if not isinstance(secret_keys, list) or not all(k in env for k in secret_keys):
+        raise Rejected("invalid secret keys")
     cpus, memory = args.get("cpus"), args.get("memory")
     return {
         "app": _match(APP_RE, args.get("app"), "app name"),
@@ -128,6 +131,7 @@ def validate(args: dict[str, Any]) -> dict[str, Any]:
         if memory is not None
         else None,
         "env": dict(env),
+        "secret_keys": list(secret_keys),
     }
 
 
@@ -442,7 +446,8 @@ def _write_env_file(workdir: str, deployment_id: str, env: dict[str, str]) -> st
 def deploy(args: dict[str, Any], emit: Emit) -> dict[str, Any]:
     """Run one deployment. Returns {"exit_code", "output", "result"}."""
     spec = validate(args)
-    redact = Redactor(list(spec["env"].values()))
+    # Mask secret values wherever output is shown; plain values stay readable.
+    redact = Redactor([spec["env"][k] for k in spec["secret_keys"]])
 
     def say(level: str, message: str) -> None:
         emit(level, redact(message))

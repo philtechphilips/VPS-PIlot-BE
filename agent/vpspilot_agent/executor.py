@@ -148,7 +148,9 @@ def _run_streaming(
     args = dict(job.get("payload") or {})
     if job["type"] == "app.deploy" and args.pop("has_env", False):
         try:
-            args["env"] = client.get(f"{base}/secrets").get("env") or {}
+            secrets = client.get(f"{base}/secrets")
+            args["env"] = secrets.get("env") or {}
+            args["secret_keys"] = secrets.get("secret_keys") or []
         except ApiError as error:
             if isinstance(error, NotEnrolled):
                 raise

@@ -156,7 +156,8 @@ def job_secrets(job_id: str, agent: Agent, db: DbSession):
     app = db.scalar(select(Application).where(Application.name == job.payload["app"]))
     if app is None or app.server_id != agent.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No secrets for this job")
-    return {"env": apps.env_values(app)}
+    # secret_keys tells the agent which values to mask in build output.
+    return {"env": apps.env_values(app), "secret_keys": apps.secret_keys(app)}
 
 
 @router.post("/v1/jobs/{job_id}/events", status_code=status.HTTP_202_ACCEPTED)
