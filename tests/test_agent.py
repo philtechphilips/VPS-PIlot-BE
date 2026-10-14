@@ -167,6 +167,7 @@ def test_executor_reports_helper_result():
             "exit_code": 0,
             "output": "cron.service: active",
             "error": None,
+            "result": {},
         },
     )
 

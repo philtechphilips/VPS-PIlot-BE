@@ -33,9 +33,9 @@ echo "    $PRETTY_NAME · $(uname -m) · control plane $API_URL"
 export DEBIAN_FRONTEND=noninteractive
 # Keep apt quiet: no needrestart prompts or reports during install.
 export NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1
-echo "==> Installing dependencies (python3, python3-psutil)"
+echo "==> Installing dependencies (python3, python3-psutil, git)"
 apt-get update -qq
-apt-get install -y -qq python3 python3-psutil curl ca-certificates >/dev/null
+apt-get install -y -qq python3 python3-psutil git curl ca-certificates >/dev/null
 
 echo "==> Creating unprivileged user 'vpspilot'"
 id vpspilot >/dev/null 2>&1 || useradd --system --home /var/lib/vpspilot --shell /usr/sbin/nologin vpspilot

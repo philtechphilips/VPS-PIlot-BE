@@ -22,8 +22,12 @@ import socket
 import struct
 import subprocess
 import sys
+import threading
 from collections.abc import Callable
 from typing import Any
+
+from vpspilot_agent import deploy
+from vpspilot_agent.errors import Rejected
 
 log = logging.getLogger("vpspilot_helper")
 
@@ -32,12 +36,8 @@ CONTAINER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 PROTECTED_UNITS = {"vpspilot-agent.service", "vpspilot-helper.service"}
 NO_STOP_UNITS = {"ssh.service", "sshd.service"}
 MAX_OUTPUT = 64 * 1024
-MAX_REQUEST = 16 * 1024
+MAX_REQUEST = 1024 * 1024  # deploys carry env values
 TIMEOUT = 60
-
-
-class Rejected(Exception):
-    pass
 
 
 def _unit(args: dict[str, Any]) -> str:
@@ -134,13 +134,24 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
 }
 
 
-def handle(request: dict[str, Any]) -> dict[str, Any]:
+def _no_events(level: str, message: str) -> None:
+    pass
+
+
+def handle(request: dict[str, Any], emit: deploy.Emit = _no_events) -> dict[str, Any]:
+    """Run one allowlisted operation. Long ones (deploys) report progress
+    through emit(level, message) as they go."""
     op = request.get("op")
     args = request.get("args") or {}
-    if op not in OPERATIONS or not isinstance(args, dict):
+    if (op not in OPERATIONS and op not in deploy.STREAMING) or not isinstance(
+        args, dict
+    ):
         return {"ok": False, "error": f"operation not allowed: {op}"}
     try:
-        result = OPERATIONS[op](args)
+        if op in deploy.STREAMING:
+            result = deploy.STREAMING[op](args, emit)
+        else:
+            result = OPERATIONS[op](args)
     except Rejected as error:
         return {"ok": False, "error": str(error)}
     return {"ok": result["exit_code"] == 0, **result}
@@ -166,31 +177,49 @@ def serve(path: str, group: str = "vpspilot", agent_user: str = "vpspilot") -> N
     log.info("helper listening on %s", path)
     while True:
         conn, _ = server.accept()
-        with conn:
-            try:
-                if not _peer_allowed(conn, allowed):
-                    log.warning("rejected connection from unexpected user")
-                    continue
-                raw = b""
-                while not raw.endswith(b"\n") and len(raw) < MAX_REQUEST:
-                    chunk = conn.recv(4096)
-                    if not chunk:
-                        break
-                    raw += chunk
-                request = json.loads(raw or b"{}")
-                response = handle(request)
-                log.info(
-                    "%s %s -> %s",
-                    request.get("op"),
-                    json.dumps(request.get("args") or {})[:200],
-                    "ok" if response.get("ok") else response.get("error") or "failed",
-                )
-            except (ValueError, OSError) as error:
-                response = {"ok": False, "error": f"bad request: {error}"}
-            try:
-                conn.sendall(json.dumps(response).encode() + b"\n")
-            except OSError:
-                pass
+        # One thread per connection: a deploy can take minutes and must not
+        # block quick calls like docker.ps from the agent's inventory.
+        threading.Thread(target=_serve_one, args=(conn, allowed), daemon=True).start()
+
+
+def _serve_one(conn: socket.socket, allowed: set[int]) -> None:
+    with conn:
+        try:
+            if not _peer_allowed(conn, allowed):
+                log.warning("rejected connection from unexpected user")
+                return
+            raw = b""
+            while not raw.endswith(b"\n") and len(raw) < MAX_REQUEST:
+                chunk = conn.recv(65536)
+                if not chunk:
+                    break
+                raw += chunk
+            request = json.loads(raw or b"{}")
+            args = request.get("args") or {}
+            # Log the shape, never env values.
+            shown = (
+                {k: v for k, v in args.items() if k != "env"}
+                if isinstance(args, dict)
+                else {}
+            )
+
+            def emit(level: str, message: str) -> None:
+                line = {"event": {"level": level, "message": message}}
+                conn.sendall(json.dumps(line).encode() + b"\n")
+
+            response = handle(request, emit)
+            log.info(
+                "%s %s -> %s",
+                request.get("op"),
+                json.dumps(shown)[:200],
+                "ok" if response.get("ok") else response.get("error") or "failed",
+            )
+        except (ValueError, OSError) as error:
+            response = {"ok": False, "error": f"bad request: {error}"}
+        try:
+            conn.sendall(json.dumps(response).encode() + b"\n")
+        except OSError:
+            pass
 
 
 def call(
@@ -198,19 +227,29 @@ def call(
     args: dict[str, Any] | None = None,
     path: str = "/run/vpspilot/helper.sock",
     timeout: float = TIMEOUT + 5,
+    on_event: Callable[[str, str], None] | None = None,
 ) -> dict[str, Any]:
-    """Client used by the (unprivileged) agent."""
+    """Client used by the (unprivileged) agent. Progress lines from long
+    operations go to on_event; the last line is the result. `timeout` is
+    the longest silence tolerated, not the total duration."""
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
         conn.settimeout(timeout)
         conn.connect(path)
         conn.sendall(json.dumps({"op": op, "args": args or {}}).encode() + b"\n")
-        raw = b""
-        while not raw.endswith(b"\n"):
+        buffer = b""
+        while True:
             chunk = conn.recv(65536)
             if not chunk:
                 break
-            raw += chunk
-    return json.loads(raw)
+            buffer += chunk
+            while b"\n" in buffer:
+                line, buffer = buffer.split(b"\n", 1)
+                message = json.loads(line)
+                if "event" not in message:
+                    return message
+                if on_event:
+                    on_event(message["event"]["level"], message["event"]["message"])
+    return json.loads(buffer) if buffer.strip() else {"ok": False, "error": "no reply"}
 
 
 def main() -> int:

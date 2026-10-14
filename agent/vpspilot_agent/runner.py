@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import signal
+import threading
 import time
 from collections import deque
 from typing import Any
@@ -34,6 +35,10 @@ class Runner:
         self.next_metrics = now + 2  # let the CPU counter warm up
         self.next_inventory = now + 1
         self.next_claim = now + 1
+        # One job at a time, off the main loop so heartbeats continue
+        # through long deployments.
+        self.worker: threading.Thread | None = None
+        self.revoked = False
 
     def stop(self, *_: Any) -> None:
         log.info("Stopping")
@@ -61,14 +66,31 @@ class Runner:
 
     def claim_and_run(self) -> bool:
         """Run one queued job if there is one. Returns True if a job ran."""
+        if self.worker and self.worker.is_alive():
+            return False
         reply = self.client.post("/agent/v1/jobs/claim", {})
         job = reply.get("job")
         if not job:
             return False
-        executor.run_job(self.client, job)
+        self.worker = threading.Thread(
+            target=self._run_job, args=(job,), name=f"job-{job['id']}", daemon=True
+        )
+        self.worker.start()
+        return True
+
+    def _run_job(self, job: dict[str, Any]) -> None:
+        try:
+            executor.run_job(self.client, job)
+        except NotEnrolled:
+            self.revoked = True
+            self.stopping = True
+        except (ApiError, OSError) as error:
+            log.warning("job %s: couldn't report result (%s)", job.get("id"), error)
+        except Exception:  # noqa: BLE001 - a job must never kill the agent
+            log.exception("job %s crashed", job.get("id"))
         # Jobs change what's running; refresh the inventory soon.
         self.next_inventory = min(self.next_inventory, time.monotonic() + 2)
-        return True
+        self.next_claim = time.monotonic()
 
     def tick(self) -> None:
         now = time.monotonic()
@@ -82,9 +104,8 @@ class Runner:
             self.next_inventory = now + INVENTORY_SECONDS
             self.send_inventory()
         if now >= self.next_claim:
-            ran = self.claim_and_run()
-            # Keep draining the queue; otherwise poll again shortly.
-            self.next_claim = now if ran else now + CLAIM_SECONDS
+            self.claim_and_run()
+            self.next_claim = now + CLAIM_SECONDS
 
     def run(self) -> int:
         signal.signal(signal.SIGTERM, self.stop)
@@ -121,7 +142,7 @@ class Runner:
                     len(self.buffer),
                 )
                 self._sleep(delay)
-        return 0
+        return EXIT_NOT_ENROLLED if self.revoked else 0
 
     def _sleep(self, seconds: float) -> None:
         end = time.monotonic() + seconds

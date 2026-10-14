@@ -28,11 +28,16 @@ class Client:
         self.timeout = timeout
 
     def post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
-        data = json.dumps(body, default=str).encode()
+        return self._send("POST", path, json.dumps(body, default=str).encode())
+
+    def get(self, path: str) -> dict[str, Any]:
+        return self._send("GET", path, None)
+
+    def _send(self, method: str, path: str, data: bytes | None) -> dict[str, Any]:
         request = urllib.request.Request(
             f"{self.api_url}{path}",
             data=data,
-            method="POST",
+            method=method,
             headers={
                 "Content-Type": "application/json",
                 "Accept": "application/json",
