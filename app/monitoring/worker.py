@@ -33,6 +33,9 @@ def _tick() -> None:
         from app.core import artifacts
 
         artifacts.prune()
+        from app.servers import service as servers
+
+        servers.rollup_due(db)
         counts = service.evaluate(db)
         if counts["fired"] or counts["resolved"]:
             logger.info(

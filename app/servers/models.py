@@ -100,3 +100,29 @@ class MetricSample(Base):
     load_15: Mapped[float] = mapped_column(Float)
     net_rx_bps: Mapped[float] = mapped_column(Float)
     net_tx_bps: Mapped[float] = mapped_column(Float)
+
+
+class MetricRollup(Base):
+    """One hour of host metrics (average and peak), kept much longer than
+    the raw samples for 30/90-day charts."""
+
+    __tablename__ = "metric_rollups"
+    __table_args__ = (
+        Index("metric_rollups_server_id_hour_idx", "server_id", "hour", unique=True),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True
+    )
+    server_id: Mapped[str] = mapped_column(ForeignKey("servers.id", ondelete="CASCADE"))
+    hour: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))  # start, UTC
+    samples: Mapped[int]
+    cpu_percent: Mapped[float] = mapped_column(Float)
+    cpu_max: Mapped[float] = mapped_column(Float)
+    memory_percent: Mapped[float] = mapped_column(Float)
+    memory_max: Mapped[float] = mapped_column(Float)
+    swap_percent: Mapped[float] = mapped_column(Float)
+    disk_percent: Mapped[float] = mapped_column(Float)
+    load_1: Mapped[float] = mapped_column(Float)
+    net_rx_bps: Mapped[float] = mapped_column(Float)
+    net_tx_bps: Mapped[float] = mapped_column(Float)

@@ -182,7 +182,7 @@ def get_metrics(
     server_id: str,
     db: DbSession,
     _: AdminUser,
-    range: Annotated[str, Query(pattern="^(1h|24h|7d)$")] = "1h",  # noqa: A002
+    range: Annotated[str, Query(pattern="^(1h|24h|7d|30d|90d)$")] = "1h",  # noqa: A002
 ):
     _get(db, server_id)
     return service.metric_series(db, server_id, range)
