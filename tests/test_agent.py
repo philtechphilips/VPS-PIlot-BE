@@ -83,3 +83,109 @@ def test_revoked_agent_exits_without_retrying(monkeypatch):
     )
     monkeypatch.setattr("signal.signal", lambda *a: None)
     assert runner.run() == EXIT_NOT_ENROLLED
+
+
+# ---------------------------------------------------------------------------
+# Privileged helper and executor
+# ---------------------------------------------------------------------------
+
+from vpspilot_agent import executor, helper  # noqa: E402
+
+
+def test_helper_rejects_anything_off_the_allowlist():
+    assert helper.handle({"op": "shell", "args": {"cmd": "id"}})["ok"] is False
+    assert (
+        "invalid unit"
+        in helper.handle({"op": "service.restart", "args": {"unit": "x; id"}})["error"]
+    )
+    assert (
+        "managed by VPSPilot"
+        in helper.handle(
+            {"op": "service.stop", "args": {"unit": "vpspilot-agent.service"}}
+        )["error"]
+    )
+    assert (
+        "SSH"
+        in helper.handle({"op": "service.stop", "args": {"unit": "ssh.service"}})[
+            "error"
+        ]
+    )
+    assert (
+        "lines"
+        in helper.handle(
+            {"op": "service.logs", "args": {"unit": "cron.service", "lines": 9999}}
+        )["error"]
+    )
+    assert helper.handle({"op": "ping"})["output"] == "pong"
+
+
+def test_helper_runs_argument_lists(monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        helper,
+        "_run",
+        lambda cmd, timeout=60: seen.append(cmd) or {"exit_code": 0, "output": "ok\n"},
+    )
+    result = helper.handle(
+        {"op": "container.logs", "args": {"container": "web", "lines": 20}}
+    )
+    assert result["ok"] is True
+    assert seen == [["docker", "logs", "--tail", "20", "--timestamps", "web"]]
+
+
+class RecordingClient:
+    def __init__(self):
+        self.calls = []
+
+    def post(self, path, body):
+        self.calls.append((path, body))
+        return {}
+
+
+def test_executor_reports_helper_result():
+    client = RecordingClient()
+    job = {
+        "id": "j1",
+        "type": "service.restart",
+        "version": 1,
+        "payload": {"unit": "cron.service"},
+    }
+    status = executor.run_job(
+        client,
+        job,
+        call=lambda op, args: {
+            "ok": True,
+            "exit_code": 0,
+            "output": "cron.service: active",
+        },
+    )
+    assert status == "succeeded"
+    assert client.calls[-1] == (
+        "/agent/v1/jobs/j1/complete",
+        {
+            "status": "succeeded",
+            "exit_code": 0,
+            "output": "cron.service: active",
+            "error": None,
+        },
+    )
+
+
+def test_executor_refuses_unknown_jobs_and_handles_missing_helper():
+    client = RecordingClient()
+    assert (
+        executor.run_job(client, {"id": "j2", "type": "shell.run", "payload": {}})
+        == "failed"
+    )
+
+    def down(op, args):
+        raise FileNotFoundError("no socket")
+
+    job = {
+        "id": "j3",
+        "type": "service.logs",
+        "version": 1,
+        "payload": {"unit": "cron.service"},
+    }
+    assert executor.run_job(client, job, call=down) == "failed"
+    assert "helper unavailable" in client.calls[-1][1]["error"]
