@@ -34,11 +34,13 @@ SUPPORTED = {
     "db.admin",
     "db.redis",
     "logs.read",
+    "proxy.apply",
+    "proxy.status",
 }
 # Long operations that stream progress from the helper.
-STREAMING = {"app.deploy", "app.remove", "db.create", "db.remove"}
+STREAMING = {"app.deploy", "app.remove", "db.create", "db.remove", "proxy.apply"}
 # Read-only, frequent: no "Running ..." progress event.
-QUIET = {"app.logs", "logs.read", "db.query", "db.explore", "db.redis"}
+QUIET = {"app.logs", "logs.read", "db.query", "db.explore", "db.redis", "proxy.status"}
 STREAM_IDLE_TIMEOUT = 30 * 60
 MAX_OUTPUT = 256 * 1024
 MAX_EVENT = 2000

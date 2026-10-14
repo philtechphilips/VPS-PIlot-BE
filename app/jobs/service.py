@@ -26,7 +26,14 @@ RUN_TIMEOUTS = {"app.deploy": timedelta(minutes=25), "db.create": timedelta(minu
 LONGEST_TIMEOUT = max([RUN_TIMEOUT, *RUN_TIMEOUTS.values()])
 MAX_OUTPUT = 64 * 1024
 MAX_EVENTS_PER_JOB = 500
-READ_ONLY_TYPES = {"app.logs", "logs.read", "db.query", "db.explore", "db.redis"}
+READ_ONLY_TYPES = {
+    "app.logs",
+    "logs.read",
+    "db.query",
+    "db.explore",
+    "db.redis",
+    "proxy.status",
+}
 
 
 class JobError(Exception):
@@ -173,11 +180,7 @@ def list_jobs(db: Session, server_id: str | None = None, limit: int = 30) -> lis
     query = (
         select(Job)
         # Database reads (queries, browsing) are as frequent as log reads.
-        .where(
-            Job.type.not_in(
-                ("app.logs", "logs.read", "db.query", "db.explore", "db.redis")
-            )
-        )
+        .where(Job.type.not_in(READ_ONLY_TYPES))
         .order_by(Job.created_at.desc(), Job.id)
         .limit(limit)
     )

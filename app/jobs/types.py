@@ -255,7 +255,48 @@ class LogsReadPayload(Strict):
     )
 
 
+ProxyHost = Annotated[
+    str,
+    StringConstraints(
+        max_length=253,
+        pattern=r"^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$",
+    ),
+]
+
+
+class ProxySite(Strict):
+    host: ProxyHost
+    tls: Literal["auto", "internal", "off"]
+    upstream: (
+        Annotated[
+            str,
+            StringConstraints(
+                pattern=r"^vp-[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?:\d{1,5}$"
+            ),
+        ]
+        | None
+    ) = None
+    redirect_to: ProxyHost | None = None
+
+
+class ProxyApplyPayload(Strict):
+    sites: Annotated[list[ProxySite], Field(max_length=500)]
+    email: (
+        Annotated[
+            str,
+            StringConstraints(pattern=r"^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,190}$"),
+        ]
+        | None
+    ) = None
+
+
+class ProxyStatusPayload(Strict):
+    hosts: Annotated[list[ProxyHost], Field(max_length=200)]
+
+
 JOB_TYPES: dict[str, type[Strict]] = {
+    "proxy.apply": ProxyApplyPayload,
+    "proxy.status": ProxyStatusPayload,
     "logs.read": LogsReadPayload,
     "db.create": DbCreatePayload,
     "db.remove": DbRemovePayload,

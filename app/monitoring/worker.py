@@ -21,6 +21,9 @@ def _tick() -> None:
                 text("SELECT pg_try_advisory_xact_lock(7413001)")
             ).scalar():
                 return
+        from app.domains import service as domains
+
+        domains.refresh_due(db)
         counts = service.evaluate(db)
         if counts["fired"] or counts["resolved"]:
             logger.info(

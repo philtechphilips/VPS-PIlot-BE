@@ -86,7 +86,7 @@ class AlertOut(BaseModel):
 def _rule_out(rule: AlertRule) -> RuleOut:
     spec = service.KINDS[rule.kind]
     return RuleOut.model_validate(rule).model_copy(
-        update={"target": spec.target, "metric": bool(spec.metric)}
+        update={"target": spec.target, "metric": spec.threshold is not None}
     )
 
 

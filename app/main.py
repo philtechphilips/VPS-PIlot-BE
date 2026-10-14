@@ -9,6 +9,7 @@ from app.audit.router import router as audit_router
 from app.auth.router import router as auth_router
 from app.core.config import settings
 from app.databases.router import router as databases_router
+from app.domains.router import router as domains_router
 from app.github.router import router as github_router
 from app.jobs.router import router as jobs_router
 from app.logs.router import router as logs_router
@@ -58,6 +59,7 @@ app.include_router(notifications_router)
 app.include_router(monitoring_router)
 app.include_router(databases_router)
 app.include_router(logs_router)
+app.include_router(domains_router)
 
 
 @app.get("/")

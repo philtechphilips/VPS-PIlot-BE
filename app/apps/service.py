@@ -242,7 +242,25 @@ def update_settings(db: Session, app: Application, data: dict[str, Any]) -> Appl
         app.env = encode_env(data["env"], app.env or [])
     db.commit()
     db.refresh(app)
+    if "container_port" in data:
+        _reapply_proxy(db, app.server_id, app.id)
     return app
+
+
+def _reapply_proxy(db: Session, server_id: str, app_id: str | None = None) -> None:
+    """The proxy points at vp-<app>:<container_port>; keep it in sync."""
+    from app.domains import service as domains
+    from app.domains.models import Domain
+
+    query = select(Domain).where(Domain.server_id == server_id)
+    if app_id:
+        query = query.where(Domain.application_id == app_id)
+    if db.scalar(query.limit(1)) is None and app_id:
+        return
+    try:
+        domains.apply(db, server_id, "system", "VPSPilot")
+    except domains.DomainError:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -577,8 +595,25 @@ def remove_app(
             )
         except jobs.JobError:
             pass  # The record is removed regardless; the container may linger.
+    from app.domains.models import Domain
+
+    app_domains = list(
+        db.scalars(select(Domain).where(Domain.application_id == app.id))
+    )
+    for domain in app_domains:
+        # Redirects to the app's domains go too.
+        for other in db.scalars(
+            select(Domain).where(Domain.redirect_to == domain.hostname)
+        ):
+            db.delete(other)
+        db.delete(domain)
+    had_domains = bool(app_domains)
+    server_id = app.server_id
     db.delete(app)
     db.commit()
+    if had_domains:
+        # Its domains are gone with it; stop serving them.
+        _reapply_proxy(db, server_id)
 
 
 # ---------------------------------------------------------------------------

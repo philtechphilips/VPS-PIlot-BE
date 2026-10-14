@@ -52,6 +52,8 @@ KINDS: dict[str, Kind] = {
     "app_down": Kind(
         "Application down", "application", duration=2, severity="critical"
     ),
+    # threshold = days of validity left (Let's Encrypt domains only)
+    "tls_expiring": Kind("Certificate expiring", "domain", threshold=14, duration=0),
 }
 
 
@@ -106,7 +108,7 @@ def create_rule(db: Session, data: dict[str, Any]) -> AlertRule:
     spec = KINDS.get(data["kind"])
     if spec is None:
         raise RuleError(422, "Unknown rule type")
-    if spec.metric and data.get("threshold") is None:
+    if spec.threshold is not None and data.get("threshold") is None:
         raise RuleError(422, "This rule needs a threshold")
     if data.get("server_id") and spec.target != "server":
         raise RuleError(422, "This rule applies to applications, not one server")
@@ -116,7 +118,7 @@ def create_rule(db: Session, data: dict[str, Any]) -> AlertRule:
         id=new_id(),
         kind=data["kind"],
         name=(data.get("name") or spec.label)[:100],
-        threshold=data.get("threshold") if spec.metric else None,
+        threshold=data.get("threshold") if spec.threshold is not None else None,
         duration_minutes=data.get("duration_minutes") or spec.duration,
         severity=data.get("severity") or spec.severity,
         enabled=data.get("enabled", True),
@@ -134,7 +136,11 @@ def update_rule(db: Session, rule: AlertRule, data: dict[str, Any]) -> AlertRule
     for field in ("name", "duration_minutes", "severity", "enabled", "notify_email"):
         if data.get(field) is not None:
             setattr(rule, field, data[field])
-    if "threshold" in data and data["threshold"] is not None and spec.metric:
+    if (
+        "threshold" in data
+        and data["threshold"] is not None
+        and spec.threshold is not None
+    ):
         rule.threshold = data["threshold"]
     if not rule.enabled:
         # Disabling a rule closes its incidents quietly.
@@ -192,6 +198,17 @@ def _check_metric(db: Session, rule: AlertRule, server: Server, now: datetime) -
     return Check(None, round(avg, 1), detail)
 
 
+def _check_certificate(rule: AlertRule, domain, now: datetime) -> Check:
+    if domain.cert_expires_at is None:
+        return Check(None)
+    days = (_aware(domain.cert_expires_at) - now).total_seconds() / 86400
+    issuer = domain.cert_issuer or "unknown issuer"
+    detail = f"Certificate expires in {max(0, int(days))} days ({issuer})"
+    if days < rule.threshold:
+        return Check(True, round(days, 1), detail)
+    return Check(False, round(days, 1), detail)
+
+
 def _check_app(app: Application, server: Server | None, now: datetime) -> Check:
     if server is None or app.current_deployment_id is None:
         return Check(None)  # never released: nothing should be running yet
@@ -241,13 +258,18 @@ def evaluate(db: Session, now: datetime | None = None) -> dict[str, int]:
     )
     by_id = {s.id: s for s in servers}
     apps = list(db.scalars(select(Application)))
+    from app.domains.models import Domain
+
+    certs = list(db.scalars(select(Domain).where(Domain.tls_mode == "auto")))
 
     for rule in db.scalars(select(AlertRule).where(AlertRule.enabled.is_(True))):
         spec = KINDS.get(rule.kind)
         if spec is None:
             continue
         open_by_target = {a.target_id: a for a in _open_alerts(db, rule.id)}
-        if spec.target == "server":
+        if spec.target == "domain":
+            targets = [(d.id, d.hostname, d) for d in certs]
+        elif spec.target == "server":
             targets = [
                 (s.id, s.name, s)
                 for s in servers
@@ -269,6 +291,8 @@ def evaluate(db: Session, now: datetime | None = None) -> dict[str, int]:
             seen.add(target_id)
             if rule.kind == "agent_offline":
                 check = _check_offline(rule, target, now)
+            elif rule.kind == "tls_expiring":
+                check = _check_certificate(rule, target, now)
             elif spec.metric:
                 check = _check_metric(db, rule, target, now)
             else:
