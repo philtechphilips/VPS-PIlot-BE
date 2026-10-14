@@ -5,6 +5,8 @@
 #
 #   ./lab/lab.sh up                 create the lab VMs
 #   ./lab/lab.sh status             list VMs and whether the API is reachable
+#   ./lab/lab.sh enroll web-1 ept_...            enroll with a token (no quoting needed)
+#   ./lab/lab.sh enroll web-1 ept_... https://x.ngrok-free.app   ...via another API URL
 #   ./lab/lab.sh enroll web-1 '<install command from the dashboard>'
 #   ./lab/lab.sh shell web-1        open a shell in a VM
 #   ./lab/lab.sh stop web-2         stop a VM (watch it go offline)
@@ -57,8 +59,21 @@ cmd_status() {
 }
 
 cmd_enroll() {
-  local name="${1:?vm name}" command="${2:?install command (quote it)}"
-  limactl shell "$name" -- bash -c "$command"
+  local name="${1:?vm name}" arg="${2:?enrollment token (ept_...) or quoted install command}"
+  if [[ "$arg" == ept_* ]]; then
+    # Just the token: build the install command against the API on this Mac
+    # (or the URL given, e.g. an ngrok tunnel).
+    local url="${3:-http://host.lima.internal:${API_PORT}}"
+    url="${url%/}"
+    echo "==> Enrolling $name via $url"
+    limactl shell "$name" -- bash -c "curl -fsSL '$url/agent/install.sh' | sudo bash -s -- --token '$arg' --url '$url'"
+  elif [[ "$arg" == *"|"* ]]; then
+    limactl shell "$name" -- bash -c "$arg"
+  else
+    echo "Pass the token (ept_...) or the whole install command in single quotes." >&2
+    echo "Without quotes your shell runs the part after '|' on this Mac instead of the VM." >&2
+    exit 2
+  fi
 }
 
 case "${1:-}" in

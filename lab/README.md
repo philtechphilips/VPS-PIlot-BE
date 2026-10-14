@@ -29,6 +29,8 @@ like real VPSes (systemd, apt, their own network). Uses
    install command, then:
 
    ```bash
+   ./lab/lab.sh enroll web-1 ept_…
+   # or paste the dashboard's whole command, in single quotes:
    ./lab/lab.sh enroll web-1 'curl -fsSL http://host.lima.internal:8000/agent/install.sh | sudo bash -s -- --token ept_…'
    ```
 
