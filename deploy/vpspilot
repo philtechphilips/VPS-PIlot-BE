@@ -8,6 +8,7 @@
 #   vpspilot restart           apply .env changes (recreates api and web)
 #   vpspilot backup [DIR]      dump the control-plane database and its keys
 #   vpspilot restore FILE      restore a dump made by `vpspilot backup`
+#   vpspilot admin EMAIL       add another admin (or promote a user)
 set -euo pipefail
 
 ROOT="/opt/vpspilot"
@@ -91,8 +92,12 @@ case "${1:-status}" in
     compose up -d
     echo "Restored. The API and dashboard are restarting."
     ;;
+  admin)
+    need_root
+    docker exec -it vpspilot-api python -m app.users.create_admin "${2:?usage: vpspilot admin EMAIL}"
+    ;;
   *)
-    sed -n '2,12p' "$0"
+    sed -n '2,13p' "$0"
     exit 2
     ;;
 esac

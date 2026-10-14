@@ -45,6 +45,8 @@ Running the installer again is safe. It keeps the existing secrets and data.
 | `sudo vpspilot upgrade` | Back up, pull the latest code, rebuild and restart. Migrations run on start. |
 | `sudo vpspilot backup [DIR]` | Write the database and `.env` to `DIR` (default `/var/backups/vpspilot`) |
 | `sudo vpspilot restore FILE` | Restore a file made by `vpspilot backup` |
+| `sudo vpspilot restart` | Apply edits to `.env` (recreates the API and dashboard) |
+| `sudo vpspilot admin EMAIL` | Add another admin, or promote an existing user |
 
 After upgrading, upgrade each server's agent from its page in the dashboard.
 
