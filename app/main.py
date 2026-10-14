@@ -3,6 +3,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.apps.router import router as apps_router
 from app.audit.router import router as audit_router
 from app.auth.router import router as auth_router
 from app.core.config import settings
@@ -36,6 +37,7 @@ app.include_router(servers_router)
 app.include_router(agent_router)
 app.include_router(jobs_router)
 app.include_router(audit_router)
+app.include_router(apps_router)
 
 
 @app.get("/")

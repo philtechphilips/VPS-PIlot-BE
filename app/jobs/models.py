@@ -52,6 +52,8 @@ class Job(Base):
     # Bounded command output (see MAX_OUTPUT in the service)
     output: Mapped[str | None] = mapped_column(Text)
     error: Mapped[str | None] = mapped_column(String(500))
+    # Small structured outcome (e.g. the commit and image a deploy produced)
+    result: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now()
     )

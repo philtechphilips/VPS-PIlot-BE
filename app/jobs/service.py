@@ -3,7 +3,7 @@
 from datetime import UTC, datetime, timedelta
 
 from pydantic import ValidationError
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.audit import service as audit
@@ -14,6 +14,9 @@ from app.servers.models import Server
 
 QUEUE_TTL = timedelta(minutes=10)  # unclaimed jobs expire
 RUN_TIMEOUT = timedelta(minutes=5)  # claimed jobs must finish in time
+# Builds take longer than service actions.
+RUN_TIMEOUTS = {"app.deploy": timedelta(minutes=25)}
+LONGEST_TIMEOUT = max([RUN_TIMEOUT, *RUN_TIMEOUTS.values()])
 MAX_OUTPUT = 64 * 1024
 MAX_EVENTS_PER_JOB = 500
 
@@ -29,19 +32,38 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+# Called with (db, job) whenever a job reaches a final state, so features that
+# own a job (deployments) can update their records. Registered at import.
+on_finished: list = []
+
+
 def reap(db: Session) -> None:
     """Expire unclaimed jobs past their deadline and fail stuck ones."""
     now = _now()
-    db.execute(
-        update(Job)
-        .where(Job.status == "queued", Job.expires_at < now)
-        .values(status="expired", finished_at=now, error="Not picked up in time")
+    for job in db.scalars(
+        select(Job).where(Job.status == "queued", Job.expires_at < now)
+    ):
+        job.status = "expired"
+        job.finished_at = now
+        job.error = "Not picked up in time"
+        for hook in on_finished:
+            hook(db, job)
+    stuck = db.scalars(
+        select(Job).where(Job.status == "running", Job.claimed_at < now - RUN_TIMEOUT)
     )
-    db.execute(
-        update(Job)
-        .where(Job.status == "running", Job.claimed_at < now - RUN_TIMEOUT)
-        .values(status="failed", finished_at=now, error="Timed out on the server")
-    )
+    for job in stuck:
+        limit = RUN_TIMEOUTS.get(job.type, RUN_TIMEOUT)
+        claimed = (
+            job.claimed_at
+            if job.claimed_at.tzinfo
+            else job.claimed_at.replace(tzinfo=UTC)
+        )
+        if claimed < now - limit:
+            job.status = "failed"
+            job.finished_at = now
+            job.error = "Timed out on the server"
+            for hook in on_finished:
+                hook(db, job)
     db.commit()
 
 
@@ -151,6 +173,8 @@ def cancel(db: Session, job: Job) -> Job:
         )
     job.status = "canceled"
     job.finished_at = _now()
+    for hook in on_finished:
+        hook(db, job)
     db.commit()
     db.refresh(job)
     return job
@@ -225,6 +249,7 @@ def complete(
     exit_code: int | None,
     output: str,
     error: str | None,
+    result: dict | None = None,
 ) -> Job:
     job = _owned_running(db, server, job_id)
     job.status = "succeeded" if succeeded else "failed"
@@ -232,6 +257,9 @@ def complete(
     job.exit_code = exit_code
     job.output = output[-MAX_OUTPUT:] if output else None
     job.error = (error or "")[:500] or None
+    job.result = result or {}
+    for hook in on_finished:
+        hook(db, job)
     audit.record(
         db,
         action=f"job.{job.type}",

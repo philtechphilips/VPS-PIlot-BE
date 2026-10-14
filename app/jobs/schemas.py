@@ -77,3 +77,5 @@ class JobCompleteRequest(BaseModel):
     # Bounded on the agent too; trimmed again server-side.
     output: Annotated[str, StringConstraints(max_length=256 * 1024)] = ""
     error: Annotated[str, StringConstraints(max_length=2000)] | None = None
+    # Small structured outcome, e.g. {"commit_sha": ..., "image_ref": ...}
+    result: Annotated[dict[str, str | int | bool | None], Field(max_length=16)] = {}

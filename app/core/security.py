@@ -140,19 +140,20 @@ def totp_uri(secret: str, account: str, issuer: str = "VPSPilot") -> str:
     return f"otpauth://totp/{label}?{urlencode({'secret': secret, 'issuer': issuer})}"
 
 
-def _fernet() -> Fernet:
+def _fernet(purpose: str = "totp") -> Fernet:
     # Derived from SECRET_KEY, which lives in the environment, not the
-    # database: a leaked database alone doesn't reveal authenticator secrets.
-    key = hashlib.sha256(f"vpspilot:totp:{settings.secret_key}".encode()).digest()
+    # database: a leaked database alone doesn't reveal stored secrets. Each
+    # purpose gets its own key so one kind of secret can't decrypt another.
+    key = hashlib.sha256(f"vpspilot:{purpose}:{settings.secret_key}".encode()).digest()
     return Fernet(base64.urlsafe_b64encode(key))
 
 
-def encrypt_secret(value: str) -> str:
-    return _fernet().encrypt(value.encode()).decode()
+def encrypt_secret(value: str, purpose: str = "totp") -> str:
+    return _fernet(purpose).encrypt(value.encode()).decode()
 
 
-def decrypt_secret(token: str) -> str:
-    return _fernet().decrypt(token.encode()).decode()
+def decrypt_secret(token: str, purpose: str = "totp") -> str:
+    return _fernet(purpose).decrypt(token.encode()).decode()
 
 
 # ---------------------------------------------------------------------------

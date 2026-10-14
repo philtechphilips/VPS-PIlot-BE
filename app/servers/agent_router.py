@@ -10,7 +10,10 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import PlainTextResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy import select
 
+from app.apps import service as apps
+from app.apps.models import Application
 from app.audit import service as audit
 from app.core.config import settings
 from app.core.database import DbSession
@@ -138,6 +141,24 @@ def claim_job(agent: Agent, db: DbSession):
     )
 
 
+@router.get("/v1/jobs/{job_id}/secrets")
+def job_secrets(job_id: str, agent: Agent, db: DbSession):
+    """Env values for a deploy job, only to the agent running it, only while
+    it runs. They are never stored in the job itself."""
+    job = jobs.get(db, job_id)
+    if (
+        job is None
+        or job.server_id != agent.id
+        or job.status != "running"
+        or job.type != "app.deploy"
+    ):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No secrets for this job")
+    app = db.scalar(select(Application).where(Application.name == job.payload["app"]))
+    if app is None or app.server_id != agent.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No secrets for this job")
+    return {"env": apps.env_values(app)}
+
+
 @router.post("/v1/jobs/{job_id}/events", status_code=status.HTTP_202_ACCEPTED)
 def job_events(job_id: str, body: JobEventsRequest, agent: Agent, db: DbSession):
     try:
@@ -160,6 +181,7 @@ def job_complete(job_id: str, body: JobCompleteRequest, agent: Agent, db: DbSess
             body.exit_code,
             body.output,
             body.error,
+            body.result,
         )
     except jobs.JobError as error:
         raise _job_error(error) from None
