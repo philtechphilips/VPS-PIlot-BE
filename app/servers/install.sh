@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # VPSPilot agent installer.
 #   curl -fsSL __API_URL__/agent/install.sh | sudo bash -s -- --token ept_...
+# Run it again without --token on an enrolled server to upgrade the agent.
 set -euo pipefail
 
 API_URL="__API_URL__"
@@ -13,7 +14,11 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-[ -n "$TOKEN" ] || { echo "Missing --token (create one in the dashboard)" >&2; exit 2; }
+CONFIG=/etc/vpspilot/agent.json
+if [ -z "$TOKEN" ] && [ ! -f "$CONFIG" ]; then
+  echo "Missing --token (create one in the dashboard)" >&2
+  exit 2
+fi
 [ "$(id -u)" -eq 0 ] || { echo "Run as root: ... | sudo bash -s -- --token ..." >&2; exit 1; }
 
 . /etc/os-release
@@ -44,16 +49,46 @@ curl -fsSL "$API_URL/agent/package.tar.gz" -o "$tmp/agent.tar.gz"
 rm -rf /opt/vpspilot-agent/vpspilot_agent
 tar -xzf "$tmp/agent.tar.gz" -C /opt/vpspilot-agent
 
-echo "==> Enrolling with the control plane"
-runuser -u vpspilot -- env PYTHONPATH=/opt/vpspilot-agent \
-  python3 -m vpspilot_agent enroll --url "$API_URL" --token "$TOKEN" --config /etc/vpspilot/agent.json
+if [ -n "$TOKEN" ]; then
+  echo "==> Enrolling with the control plane"
+  runuser -u vpspilot -- env PYTHONPATH=/opt/vpspilot-agent \
+    python3 -m vpspilot_agent enroll --url "$API_URL" --token "$TOKEN" --config "$CONFIG"
+else
+  echo "==> Already enrolled; upgrading the agent in place"
+fi
 
-echo "==> Installing systemd service"
+echo "==> Installing systemd services"
+# The helper is the only root part: a fixed allowlist of operations
+# (restart a service, read logs, manage containers) on a local socket that
+# only the vpspilot user can use. There is no "run a command" operation.
+cat > /etc/systemd/system/vpspilot-helper.service <<'UNIT'
+[Unit]
+Description=VPSPilot privileged helper
+After=network-online.target
+
+[Service]
+User=root
+Group=vpspilot
+Environment=PYTHONPATH=/opt/vpspilot-agent
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -m vpspilot_agent.helper --socket /run/vpspilot/helper.sock
+RuntimeDirectory=vpspilot
+RuntimeDirectoryMode=0750
+Restart=always
+RestartSec=3
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
 cat > /etc/systemd/system/vpspilot-agent.service <<'UNIT'
 [Unit]
 Description=VPSPilot agent
-After=network-online.target
-Wants=network-online.target
+After=network-online.target vpspilot-helper.service
+Wants=network-online.target vpspilot-helper.service
 
 [Service]
 User=vpspilot
@@ -70,7 +105,7 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
 PrivateTmp=yes
-ReadWritePaths=/var/lib/vpspilot /etc/vpspilot
+ReadWritePaths=/var/lib/vpspilot /etc/vpspilot -/run/vpspilot
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
@@ -82,8 +117,8 @@ WantedBy=multi-user.target
 UNIT
 
 systemctl daemon-reload
-systemctl enable --now vpspilot-agent >/dev/null 2>&1
-systemctl restart vpspilot-agent
+systemctl enable --now vpspilot-helper vpspilot-agent >/dev/null 2>&1
+systemctl restart vpspilot-helper vpspilot-agent
 
 echo "==> Done. The agent is running; this server will appear online in the dashboard."
 echo "    Logs: journalctl -u vpspilot-agent -f"

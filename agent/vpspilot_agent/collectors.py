@@ -169,13 +169,26 @@ def _services() -> list[dict[str, str]]:
     return services[:500]
 
 
+def _docker_ps() -> tuple[int, str]:
+    """List containers through the privileged helper (the agent itself has no
+    Docker access, which would be root-equivalent); fall back to the CLI."""
+    if os.path.exists(HELPER_SOCKET):
+        try:
+            from vpspilot_agent import helper
+
+            result = helper.call("docker.ps", {}, HELPER_SOCKET, timeout=20)
+            return int(result.get("exit_code", 1)), result.get("output", "")
+        except (OSError, ValueError):
+            pass
+    return _run(["docker", "ps", "-a", "--format", "{{json .}}"])
+
+
 def _containers() -> tuple[bool, list[dict[str, str]]]:
     if shutil.which("docker") is None:
         return False, []
-    code, out = _run(["docker", "ps", "-a", "--format", "{{json .}}"])
+    code, out = _docker_ps()
     if code != 0:
-        # Usually "permission denied" on the socket: the agent runs
-        # unprivileged and Docker access is root-equivalent.
+        # No helper and no permission on the Docker socket.
         return False, []
     containers = []
     for line in out.splitlines():
@@ -195,6 +208,8 @@ def _containers() -> tuple[bool, list[dict[str, str]]]:
         )
     return True, containers[:200]
 
+
+HELPER_SOCKET = "/run/vpspilot/helper.sock"
 
 RUNTIMES = {
     "docker": ["docker", "--version"],

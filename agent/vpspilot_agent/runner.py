@@ -9,13 +9,14 @@ import time
 from collections import deque
 from typing import Any
 
-from vpspilot_agent import collectors
+from vpspilot_agent import collectors, executor
 from vpspilot_agent.client import ApiError, Client, NotEnrolled
 from vpspilot_agent.config import AgentConfig
 
 log = logging.getLogger("vpspilot_agent")
 
 INVENTORY_SECONDS = 60
+CLAIM_SECONDS = 3  # how often to ask for queued jobs
 MAX_BUFFERED_SAMPLES = 120  # ~30 minutes at the default 15 s interval
 EXIT_NOT_ENROLLED = 78  # EX_CONFIG: systemd is told not to restart on this
 
@@ -32,6 +33,7 @@ class Runner:
         self.next_heartbeat = now
         self.next_metrics = now + 2  # let the CPU counter warm up
         self.next_inventory = now + 1
+        self.next_claim = now + 1
 
     def stop(self, *_: Any) -> None:
         log.info("Stopping")
@@ -45,6 +47,8 @@ class Runner:
         self.config.metrics_seconds = int(
             reply.get("metrics_seconds", self.config.metrics_seconds)
         )
+        if reply.get("jobs_pending"):
+            self.next_claim = time.monotonic()
 
     def collect_and_send_metrics(self) -> None:
         self.buffer.append(self.sampler.sample())
@@ -54,6 +58,17 @@ class Runner:
 
     def send_inventory(self) -> None:
         self.client.post("/agent/v1/inventory", collectors.inventory())
+
+    def claim_and_run(self) -> bool:
+        """Run one queued job if there is one. Returns True if a job ran."""
+        reply = self.client.post("/agent/v1/jobs/claim", {})
+        job = reply.get("job")
+        if not job:
+            return False
+        executor.run_job(self.client, job)
+        # Jobs change what's running; refresh the inventory soon.
+        self.next_inventory = min(self.next_inventory, time.monotonic() + 2)
+        return True
 
     def tick(self) -> None:
         now = time.monotonic()
@@ -66,6 +81,10 @@ class Runner:
         if now >= self.next_inventory:
             self.next_inventory = now + INVENTORY_SECONDS
             self.send_inventory()
+        if now >= self.next_claim:
+            ran = self.claim_and_run()
+            # Keep draining the queue; otherwise poll again shortly.
+            self.next_claim = now if ran else now + CLAIM_SECONDS
 
     def run(self) -> int:
         signal.signal(signal.SIGTERM, self.stop)
