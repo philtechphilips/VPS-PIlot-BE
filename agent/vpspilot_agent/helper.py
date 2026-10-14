@@ -42,14 +42,14 @@ TIMEOUT = 60
 
 def _unit(args: dict[str, Any]) -> str:
     unit = args.get("unit")
-    if not isinstance(unit, str) or not UNIT_RE.match(unit):
+    if not isinstance(unit, str) or not UNIT_RE.fullmatch(unit):
         raise Rejected("invalid unit name")
     return unit
 
 
 def _container(args: dict[str, Any]) -> str:
     name = args.get("container")
-    if not isinstance(name, str) or not CONTAINER_RE.match(name):
+    if not isinstance(name, str) or not CONTAINER_RE.fullmatch(name):
         raise Rejected("invalid container name")
     return name
 

@@ -267,7 +267,7 @@ def _node(
         main = pkg.get("main")
         if (
             isinstance(main, str)
-            and SAFE_PATH.match(main)
+            and SAFE_PATH.fullmatch(main)
             and ".." not in main
             and repo.exists(main)
         ):
@@ -340,20 +340,22 @@ def _py_object(repo: Repo, cls: str) -> tuple[str, str] | None:
         if module.endswith(".__init__"):
             module = module[: -len(".__init__")]
         match = pattern.search(text)
-        if match and SAFE_MODULE.match(module):
+        if match and SAFE_MODULE.fullmatch(module):
             return module, match.group(1)
-        if cls == "Flask" and factory.search(text) and SAFE_MODULE.match(module):
+        if cls == "Flask" and factory.search(text) and SAFE_MODULE.fullmatch(module):
             return module, "create_app()"
     return None
 
 
 def _django_wsgi(repo: Repo) -> str | None:
     for entry in repo.listdir("."):
-        if repo.exists(f"{entry}/wsgi.py") and SAFE_MODULE.match(entry):
+        if repo.exists(f"{entry}/wsgi.py") and SAFE_MODULE.fullmatch(entry):
             return f"{entry}.wsgi"
     for parent in ("src", "app", "backend"):
         for entry in repo.listdir(parent):
-            if repo.exists(f"{parent}/{entry}/wsgi.py") and SAFE_MODULE.match(entry):
+            if repo.exists(f"{parent}/{entry}/wsgi.py") and SAFE_MODULE.fullmatch(
+                entry
+            ):
                 return f"{parent}.{entry}.wsgi"
     return None
 
@@ -379,7 +381,7 @@ def _python(
     if not raw:
         raw = str((pyproject.get("project") or {}).get("requires-python") or "")
     version = _version(raw.replace("python-", ""), PYTHON_DEFAULT, 2)
-    if not re.match(r"^3\.(9|1[0-9])$", version):
+    if not re.fullmatch(r"3\.(9|1[0-9])", version):
         version = PYTHON_DEFAULT
 
     venv = False
@@ -526,7 +528,7 @@ def _go(
         mains = [
             d
             for d in repo.listdir("cmd")
-            if SAFE_NAME.match(d) and has_main(f"cmd/{d}")
+            if SAFE_NAME.fullmatch(d) and has_main(f"cmd/{d}")
         ]
         if len(mains) != 1:
             raise Unsupported(
@@ -555,7 +557,7 @@ def _rust(
             r'^\s*name\s*=\s*"([^"]+)"', repo.read("Cargo.toml") or "", re.MULTILINE
         )
         name = match.group(1) if match else ""
-    if not SAFE_NAME.match(name):
+    if not SAFE_NAME.fullmatch(name):
         raise Unsupported(
             "Couldn't read the package name from Cargo.toml (workspaces need a Dockerfile)."
         )

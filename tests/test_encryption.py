@@ -88,7 +88,10 @@ def test_nothing_secret_is_stored_in_plain_text(client, admin_headers, db: Sessi
 
 def test_key_rotation(client, admin_headers, db: Session, monkeypatch):
     seed(client, admin_headers)
-    old_key = settings.secret_key  # installs without ENCRYPTION_KEY used this
+    # Whatever encrypted the seed data (ENCRYPTION_KEY if set, else the
+    # SECRET_KEY fallback) becomes the previous key.
+    old_key = settings.encryption_key or settings.secret_key
+    monkeypatch.setattr(settings, "encryption_keys_previous", settings.encryption_key)
     monkeypatch.setattr(settings, "encryption_key", "brand-new-encryption-key")
     # Old data still decrypts through the fallback key.
     app = db.scalar(select(Application))

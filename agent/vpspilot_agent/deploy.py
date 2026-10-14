@@ -44,7 +44,9 @@ CPUS_RE = re.compile(r"^\d{1,2}(\.\d{1,2})?$")
 MEMORY_RE = re.compile(r"^\d{1,6}[kmg]$")
 ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 MAX_COMMAND = 500
-GIT_TOKEN_RE = re.compile(r"^[A-Za-z0-9_]{20,255}$")
+# GitHub tokens are long (hundreds of chars) and may contain "." and "-".
+# The token reaches git base64-encoded via environment config, never a shell.
+GIT_TOKEN_RE = re.compile(r"^[A-Za-z0-9_.-]{20,2048}$")
 
 GIT_TIMEOUT = 300
 BUILD_TIMEOUT = 20 * 60
@@ -66,7 +68,7 @@ class Failed(Exception):
 
 
 def _match(regex: re.Pattern[str], value: Any, what: str) -> str:
-    if not isinstance(value, str) or not regex.match(value):
+    if not isinstance(value, str) or not regex.fullmatch(value):
         raise Rejected(f"invalid {what}")
     if ".." in value and regex in (REF_RE, PATH_RE):
         raise Rejected(f"invalid {what}")
@@ -132,7 +134,7 @@ def validate(args: dict[str, Any]) -> dict[str, Any]:
     if git_token is not None and (
         clean_source["type"] != "git"
         or not isinstance(git_token, str)
-        or not GIT_TOKEN_RE.match(git_token)
+        or not GIT_TOKEN_RE.fullmatch(git_token)
     ):
         raise Rejected("invalid git token")
     secret_keys = args.get("secret_keys") or []
@@ -784,7 +786,7 @@ def app_logs(args: dict[str, Any]) -> dict[str, Any]:
     for stream, text in (("out", done.stdout), ("err", done.stderr)):
         for line in text.splitlines():
             ts, _, message = line.partition(" ")
-            if SINCE_RE.match(ts):
+            if SINCE_RE.fullmatch(ts):
                 entries.append({"t": ts, "s": stream, "m": message[:MAX_LOG_LINE]})
     entries.sort(key=lambda e: _ts_key(e["t"]))
     entries = entries[-lines:]

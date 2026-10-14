@@ -295,7 +295,15 @@ def test_agent_validates_git_tokens():
         "host_port": 20000,
     }
     assert deploy.validate({**base, "git_token": "ghs_" + "a" * 36})["git_token"]
-    for bad in ("short", "ghs_x;rm -rf /" + "a" * 20):
+    # Current GitHub installation tokens: ~390 chars with "." and "-".
+    modern = "ghs_" + "Ab9_.-" * 64
+    assert deploy.validate({**base, "git_token": modern})["git_token"] == modern
+    for bad in (
+        "short",
+        "ghs_x;rm -rf /" + "a" * 20,
+        "ghs_" + "a" * 30 + "\n",
+        "x" * 3000,
+    ):
         with pytest.raises(deploy.Rejected):
             deploy.validate({**base, "git_token": bad})
     image = {**base, "source": {"type": "image", "image": "nginx:1"}}
@@ -303,3 +311,26 @@ def test_agent_validates_git_tokens():
         deploy.validate({**image, "git_token": "ghs_" + "a" * 36})
     token = "ghs_" + "b" * 36
     assert token not in deploy.Redactor([token])(f"fatal: auth {token}")
+
+
+def test_agent_rejects_trailing_newlines():
+    from vpspilot_agent import deploy, helper
+
+    base = {
+        "app": "shop",
+        "deployment_id": "0" * 32,
+        "source": {"type": "git", "url": "https://github.com/acme/shop", "ref": "main"},
+        "container_port": 3000,
+        "host_port": 20000,
+    }
+    for bad in (
+        {"app": "shop\n"},
+        {"source": {**base["source"], "ref": "main\n"}},
+        {"source": {**base["source"], "url": "https://github.com/acme/shop\n"}},
+    ):
+        with pytest.raises(deploy.Rejected):
+            deploy.validate({**base, **bad})
+    result = helper.handle(
+        {"op": "service.restart", "args": {"unit": "cron.service\n"}}
+    )
+    assert result["ok"] is False
