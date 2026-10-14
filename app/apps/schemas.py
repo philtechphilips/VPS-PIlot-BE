@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from app.jobs.types import (
     Command,
+    ComposeService,
     Cpus,
     GitRef,
     GitUrl,
@@ -14,6 +15,7 @@ from app.jobs.types import (
     Memory,
     Port,
     RelPath,
+    Runtime,
     Since,
 )
 
@@ -45,6 +47,12 @@ class AppCreate(BaseModel):
     ]
     server_id: Annotated[str, StringConstraints(max_length=32)]
     source: GitSourceIn | ImageSourceIn = Field(discriminator="type")
+    # docker: a container (Dockerfile, detected stack or image).
+    # systemd: a native Node.js/Python release run by systemd.
+    # compose: the repository's compose file (constrained).
+    runtime: Runtime = "docker"
+    compose_file: RelPath | None = None
+    compose_service: ComposeService | None = None
     dockerfile: RelPath = "Dockerfile"
     build_context: RelPath = "."
     build_command: Command | None = None
@@ -68,6 +76,8 @@ class AppUpdate(BaseModel):
     build_context: RelPath | None = None
     build_command: Command | None = None
     start_command: Command | None = None
+    compose_file: RelPath | None = None
+    compose_service: ComposeService | None = None
     container_port: Port | None = None
     host_port: HostPort | None = None
     health_path: HealthPath | None = None
@@ -154,6 +164,8 @@ class AppOut(BaseModel):
     build_context: str
     build_command: str | None
     start_command: str | None
+    compose_file: str | None
+    compose_service: str | None
     container_port: int
     host_port: int
     health_path: str

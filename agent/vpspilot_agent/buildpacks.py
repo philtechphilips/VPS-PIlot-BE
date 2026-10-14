@@ -48,6 +48,14 @@ class Plan:
     stack: str  # human label, e.g. "Next.js · pnpm · Node 22"
     dockerfile: str
     notes: list[str] = field(default_factory=list)
+    # The same plan as shell steps, for native (systemd) releases.
+    kind: str = ""  # node | bun | python | go | rust | static
+    version: str = ""  # Node major or Python minor the project asks for
+    manager: str = ""
+    install: str | None = None
+    build: str | None = None
+    start: str = ""
+    serve_static: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -315,7 +323,17 @@ def _node(
         for x in (framework, manager if manager != "bun" else None, version_label)
         if x
     )
-    return Plan(stack=label, dockerfile=text)
+    return Plan(
+        stack=label,
+        dockerfile=text,
+        kind="bun" if manager == "bun" else "node",
+        version=version_label.removeprefix("Node "),
+        manager=manager,
+        install=install,
+        build=build_cmd,
+        start=start_cmd,
+        serve_static=serve_static,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -474,17 +492,26 @@ def _python(
         text += f"RUN {_sh((install or 'true') + extra)}\n"
     if venv:
         text += "ENV PATH=/app/.venv/bin:$PATH\n"
-    if build:
-        text += f"RUN {_sh(build)}\n"
-    elif is_django:
+    build_cmd = build
+    if not build and is_django:
         # Like Heroku: collect static files at build time when configured.
-        collect = (
+        build_cmd = (
             'python manage.py collectstatic --noinput || echo "collectstatic skipped"'
         )
-        text += f"RUN {_sh(collect)}\n"
+    if build_cmd:
+        text += f"RUN {_sh(build_cmd)}\n"
     text += f"CMD {_sh(start_cmd)}\n"
     label = " · ".join(x for x in (framework, manager, f"Python {version}") if x)
-    return Plan(stack=label, dockerfile=text)
+    return Plan(
+        stack=label,
+        dockerfile=text,
+        kind="python",
+        version=version,
+        manager=manager,
+        install=((install or "true") + extra) if (install or extra) else None,
+        build=build_cmd,
+        start=start_cmd,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -511,7 +538,7 @@ def _go(
         text = f"FROM {base}\nWORKDIR /app\n{_args(build_args)}COPY . .\n"
         text += f"RUN {_sh(build or 'go build -o /usr/local/bin/app .')}\n"
         text += f"CMD {_sh(start or 'app')}\n"
-        return Plan(stack=f"Go {version}", dockerfile=text)
+        return Plan(stack=f"Go {version}", dockerfile=text, kind="go")
 
     def has_main(rel: str) -> bool:
         return any(
@@ -544,7 +571,7 @@ def _go(
         "COPY --from=build /out/app /usr/local/bin/app\n"
         'CMD ["app"]\n'
     )
-    return Plan(stack=f"Go {version}", dockerfile=text)
+    return Plan(stack=f"Go {version}", dockerfile=text, kind="go")
 
 
 def _rust(
@@ -566,7 +593,7 @@ def _rust(
         text = f"FROM {base}\nWORKDIR /app\n{_args(build_args)}COPY . .\n"
         text += f"RUN {_sh(build or 'cargo build --release')}\n"
         text += f"CMD {_sh(start or f'./target/release/{name}')}\n"
-        return Plan(stack="Rust", dockerfile=text)
+        return Plan(stack="Rust", dockerfile=text, kind="rust")
     text = (
         f"FROM {base} AS build\nWORKDIR /src\n{_args(build_args)}COPY . .\n"
         f"RUN {_sh(f'cargo build --release && mkdir -p /out && cp target/release/{name} /out/app && rm -rf target')}\n"
@@ -575,7 +602,7 @@ def _rust(
         "COPY --from=build /out/app /usr/local/bin/app\n"
         'CMD ["app"]\n'
     )
-    return Plan(stack="Rust", dockerfile=text)
+    return Plan(stack="Rust", dockerfile=text, kind="rust")
 
 
 # ---------------------------------------------------------------------------
@@ -589,7 +616,7 @@ def _static(
     serve = 'httpd -f -v -p "${PORT:-8080}" -h /www'
     text = "FROM busybox:stable\nCOPY . /www\n"
     text += f"CMD {_sh(start or serve)}\n"
-    return Plan(stack="Static site", dockerfile=text)
+    return Plan(stack="Static site", dockerfile=text, kind="static")
 
 
 # ---------------------------------------------------------------------------

@@ -7,7 +7,14 @@ payload is rejected three times before anything executes.
 
 from typing import Annotated, Literal
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    model_validator,
+)
 
 Unit = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9@._:-]{1,200}\.service$")]
 Container = Annotated[
@@ -108,10 +115,38 @@ class ImageSource(Strict):
     pull: bool = True
 
 
+class ReleaseSource(Strict):
+    """A release kept on the server (native and Compose rollbacks)."""
+
+    type: Literal["release"]
+    release: HexId
+
+
+Runtime = Literal["docker", "systemd", "compose"]
+ComposeService = Annotated[
+    str, StringConstraints(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$")
+]
+
+
 class AppDeployPayload(Strict):
     app: AppName
     deployment_id: HexId
-    source: GitSource | ImageSource = Field(discriminator="type")
+    runtime: Runtime = "docker"
+    source: GitSource | ImageSource | ReleaseSource = Field(discriminator="type")
+    compose_file: RelPath | None = None
+    compose_service: ComposeService | None = None
+
+    @model_validator(mode="after")
+    def _source_fits_runtime(self):
+        allowed = {
+            "docker": ("git", "image"),
+            "systemd": ("git", "release"),
+            "compose": ("git", "release"),
+        }
+        if self.source.type not in allowed[self.runtime]:
+            raise ValueError(f"A {self.source.type} source can't run on {self.runtime}")
+        return self
+
     dockerfile: RelPath = "Dockerfile"
     context: RelPath = "."
     container_port: Port
@@ -144,6 +179,8 @@ class AppLogsPayload(Strict):
     app: AppName
     lines: Annotated[int, Field(ge=1, le=1000)] = 200
     since: Since | None = None
+    runtime: Runtime = "docker"
+    service: ComposeService | None = None  # the public service of a Compose app
 
 
 # ---------------------------------------------------------------------------
@@ -271,7 +308,7 @@ class ProxySite(Strict):
         Annotated[
             str,
             StringConstraints(
-                pattern=r"^vp-[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?:\d{1,5}$"
+                pattern=r"^(vp-[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?|host):\d{1,5}$"
             ),
         ]
         | None

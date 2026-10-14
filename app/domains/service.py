@@ -118,7 +118,10 @@ def desired_sites(db: Session, server_id: str) -> list[dict[str, Any]]:
             {
                 "host": d.hostname,
                 "tls": d.tls_mode,
-                "upstream": f"vp-{app.name}:{app.container_port}",
+                # Native apps listen on the server itself, on their public port.
+                "upstream": f"host:{app.host_port}"
+                if app.runtime == "systemd"
+                else f"vp-{app.name}:{app.container_port}",
             }
         )
     return sites

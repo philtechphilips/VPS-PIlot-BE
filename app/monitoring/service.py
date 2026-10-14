@@ -273,8 +273,28 @@ def _check_app(app: Application, server: Server | None, now: datetime) -> Check:
         or now - _aware(server.inventory_at) > INVENTORY_FRESH
     ):
         return Check(None)  # server offline: the offline rule covers it
-    containers = (server.inventory or {}).get("containers") or []
-    container = next((c for c in containers if c.get("name") == f"vp-{app.name}"), None)
+    inventory = server.inventory or {}
+    if app.runtime == "systemd":
+        unit = next(
+            (
+                s
+                for s in inventory.get("services") or []
+                if s.get("name") == f"vp-{app.name}.service"
+            ),
+            None,
+        )
+        if unit is None:
+            return Check(True, None, "The app's systemd service is missing")
+        if unit.get("active") != "active":
+            return Check(
+                True, None, f"Service is {unit.get('active')} ({unit.get('sub')})"
+            )
+        return Check(False)
+    name = f"vp-{app.name}"
+    if app.runtime == "compose":
+        name = f"vp-{app.name}-{app.compose_service}-1"
+    containers = inventory.get("containers") or []
+    container = next((c for c in containers if c.get("name") == name), None)
     if container is None:
         return Check(True, None, "The app's container is missing")
     if str(container.get("state")) != "running":

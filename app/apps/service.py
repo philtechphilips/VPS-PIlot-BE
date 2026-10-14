@@ -22,6 +22,29 @@ from app.servers.models import Server
 NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$")
 ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 FIRST_HOST_PORT = 20000
+# Agents older than this only run Docker apps.
+RUNTIME_AGENT = {"systemd": (1, 1, 0), "compose": (1, 1, 0)}
+RUNTIME_LABEL = {"systemd": "systemd", "compose": "Docker Compose"}
+
+
+def _version(value: str | None) -> tuple[int, ...]:
+    try:
+        return tuple(int(part) for part in (value or "0").split(".")[:3])
+    except ValueError:
+        return (0,)
+
+
+def _check_runtime(server: Server, runtime: str) -> None:
+    needed = RUNTIME_AGENT.get(runtime)
+    if needed and _version(server.agent_version) < needed:
+        raise AppError(
+            409,
+            f"{server.name}'s agent ({server.agent_version or 'unknown'}) can't run "
+            f"{RUNTIME_LABEL[runtime]} apps yet. Upgrade it to "
+            f"{'.'.join(map(str, needed))} or later from the server's page.",
+        )
+
+
 ENV_PURPOSE = "app-env"
 RESERVED_ENV = {"PORT"}  # set by VPSPilot from container_port
 
@@ -171,6 +194,12 @@ def create_app(db: Session, server: Server, data: dict[str, Any]) -> Application
         raise AppError(409, conflict)
 
     source = data["source"]
+    runtime = data.get("runtime") or "docker"
+    if runtime != "docker" and source["type"] != "git":
+        raise AppError(
+            422, f"{RUNTIME_LABEL[runtime]} apps deploy from a Git repository"
+        )
+    _check_runtime(server, runtime)
     linked: dict[str, Any] | None = None
     if source["type"] == "git" and source.get("repo_id"):
         if not source.get("installation_id"):
@@ -188,6 +217,9 @@ def create_app(db: Session, server: Server, data: dict[str, Any]) -> Application
         id=new_id(),
         name=name,
         server_id=server.id,
+        runtime=runtime,
+        compose_file=data.get("compose_file") if runtime == "compose" else None,
+        compose_service=data.get("compose_service") if runtime == "compose" else None,
         source_type=source["type"],
         repo_url=source.get("url"),
         branch=source.get("branch"),
@@ -229,6 +261,8 @@ def update_settings(db: Session, app: Application, data: dict[str, Any]) -> Appl
         "build_context",
         "build_command",
         "start_command",
+        "compose_file",
+        "compose_service",
         "auto_deploy",
         "container_port",
         "health_path",
@@ -242,7 +276,7 @@ def update_settings(db: Session, app: Application, data: dict[str, Any]) -> Appl
         app.env = encode_env(data["env"], app.env or [])
     db.commit()
     db.refresh(app)
-    if "container_port" in data:
+    if "container_port" in data or (app.runtime == "systemd" and "host_port" in data):
         _reapply_proxy(db, app.server_id, app.id)
     return app
 
@@ -271,9 +305,10 @@ def _reapply_proxy(db: Session, server_id: str, app_id: str | None = None) -> No
 def _payload(
     app: Application, deployment: Deployment, source: dict[str, Any]
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "app": app.name,
         "deployment_id": deployment.id,
+        "runtime": app.runtime,
         "source": source,
         "dockerfile": app.dockerfile,
         "context": app.build_context,
@@ -287,6 +322,10 @@ def _payload(
         "build_command": app.build_command,
         "start_command": app.start_command,
     }
+    if app.runtime == "compose":
+        payload["compose_file"] = app.compose_file
+        payload["compose_service"] = app.compose_service
+    return payload
 
 
 def _queue(
@@ -299,6 +338,12 @@ def _queue(
     request=None,
 ) -> Deployment:
     server = db.get(Server, app.server_id)
+    try:
+        _check_runtime(server, app.runtime)
+    except AppError:
+        db.delete(deployment)
+        db.commit()
+        raise
     try:
         job, _ = jobs.create(
             db,
@@ -453,6 +498,12 @@ def request_logs(
     db.execute(delete(JobEvent).where(JobEvent.job_id.in_(old)))
     db.execute(delete(Job).where(Job.id.in_(old)))
     payload: dict[str, Any] = {"app": app.name, "lines": lines}
+    if app.runtime != "docker":
+        payload["runtime"] = app.runtime
+    if app.runtime == "compose":
+        if not app.compose_service:
+            raise AppError(409, "Deploy the app first")
+        payload["service"] = app.compose_service
     if since:
         payload["since"] = since
     try:
@@ -536,9 +587,13 @@ def rollback(
     )
     db.add(deployment)
     db.flush()
-    # Images built here are local; images from a registry may be pulled again.
-    pull = app.source_type == "image"
-    source = {"type": "image", "image": target.image_ref, "pull": pull}
+    if target.image_ref.startswith("release:"):
+        # Native and Compose apps keep their last releases on the server.
+        source = {"type": "release", "release": target.image_ref[len("release:") :]}
+    else:
+        # Images built here are local; registry images may be pulled again.
+        pull = app.source_type == "image"
+        source = {"type": "image", "image": target.image_ref, "pull": pull}
     return _queue(db, app, deployment, source, actor, label, request)
 
 
@@ -635,6 +690,7 @@ def on_job_finished(db: Session, job: Job) -> None:
             **(deployment.spec or {}),
             "build_plan": str(result["build_plan"])[:120],
         }
+
     if job.status == "succeeded":
         deployment.status = "succeeded"
         deployment.commit_sha = result.get("commit_sha") or deployment.commit_sha
@@ -656,6 +712,10 @@ def on_job_finished(db: Session, job: Job) -> None:
         )
     if deployment.status == "succeeded":
         app.current_deployment_id = deployment.id
+        service = result.get("public_service")
+        if app.runtime == "compose" and not app.compose_service and service:
+            # The agent picked the only service; remember it for logs/alerts.
+            app.compose_service = str(service)[:63]
 
 
 jobs.on_finished.append(on_job_finished)

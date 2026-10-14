@@ -57,6 +57,8 @@ def _app_out(db, app: Application) -> AppOut:
         server_id=app.server_id,
         server_name=server.name if server else None,
         runtime=app.runtime,
+        compose_file=app.compose_file,
+        compose_service=app.compose_service,
         source_type=app.source_type,  # type: ignore[arg-type]
         repo_url=app.repo_url,
         github_repo=app.github_repo_full_name,

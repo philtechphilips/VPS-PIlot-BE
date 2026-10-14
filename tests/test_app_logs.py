@@ -39,7 +39,13 @@ def test_read_runtime_logs(client, admin_headers, db: Session):
 
     job = claim(client, agent)
     assert job["type"] == "app.logs"
-    assert job["payload"] == {"app": "shop", "lines": 300, "since": None}
+    assert job["payload"] == {
+        "app": "shop",
+        "lines": 300,
+        "since": None,
+        "runtime": "docker",
+        "service": None,
+    }
     client.post(
         f"/agent/v1/jobs/{job['id']}/complete",
         json={"status": "succeeded", "output": json.dumps(LOGS)},

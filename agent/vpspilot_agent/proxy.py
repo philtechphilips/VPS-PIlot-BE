@@ -35,7 +35,9 @@ HTTP_PORT, HTTPS_PORT = (
 HOST_RE = re.compile(
     r"(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
 )
-UPSTREAM_RE = re.compile(r"vp-[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?:\d{1,5}")
+# vp-<app>:<port> on the private network, or host:<port> for native apps
+# (systemd) listening on the server itself.
+UPSTREAM_RE = re.compile(r"(vp-[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?|host):\d{1,5}")
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,190}")
 
 Emit = Callable[[str, str], None]
@@ -88,8 +90,11 @@ def _sites(args: dict[str, Any]) -> list[dict[str, Any]]:
     return clean
 
 
-def render(sites: list[dict[str, Any]], email: str | None) -> str:
-    """The whole Caddyfile. Inputs are validated, so plain formatting is safe."""
+def render(
+    sites: list[dict[str, Any]], email: str | None, gateway: str | None = None
+) -> str:
+    """The whole Caddyfile. Inputs are validated, so plain formatting is safe.
+    `gateway` is the server's address on the private network (for host:)."""
     lines = ["# Managed by VPSPilot. Changes here are overwritten.", "{"]
     if email:
         lines.append(f"\temail {email}")
@@ -109,7 +114,10 @@ def render(sites: list[dict[str, Any]], email: str | None) -> str:
             lines.append(f"\tredir {scheme}://{site['redirect_to']}{{uri}} permanent")
         else:
             lines.append("\tencode zstd gzip")
-            lines.append(f"\treverse_proxy {site['upstream']}")
+            upstream = site["upstream"]
+            if upstream.startswith("host:"):
+                upstream = f"{gateway or '172.17.0.1'}:{upstream[5:]}"
+            lines.append(f"\treverse_proxy {upstream}")
         lines += ["}", ""]
     return "\n".join(lines)
 
@@ -156,12 +164,25 @@ def apply(args: dict[str, Any], emit: Emit) -> dict[str, Any]:
     os.makedirs(os.path.join(DIR, "extra"), mode=0o755, exist_ok=True)
     caddyfile = os.path.join(DIR, "Caddyfile")
     candidate = os.path.join(DIR, "Caddyfile.new")
-    with open(candidate, "w") as handle:
-        handle.write(render(sites, email))
-    os.chmod(candidate, 0o644)
-
     if _run(["docker", "network", "inspect", NETWORK], 15)[0] != 0:
         _run(["docker", "network", "create", NETWORK], 30)
+    code, out = _run(
+        [
+            "docker",
+            "network",
+            "inspect",
+            "-f",
+            "{{range .IPAM.Config}}{{.Gateway}} {{end}}",
+            NETWORK,
+        ],
+        15,
+    )
+    gateway = next(
+        (g for g in out.split() if re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", g)), None
+    )
+    with open(candidate, "w") as handle:
+        handle.write(render(sites, email, gateway))
+    os.chmod(candidate, 0o644)
     running = _running()
     if not running:
         for port in (HTTP_PORT, HTTPS_PORT):

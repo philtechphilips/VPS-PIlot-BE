@@ -28,6 +28,7 @@ class Application(Base):
     server_id: Mapped[str] = mapped_column(
         ForeignKey("servers.id", ondelete="CASCADE"), index=True
     )
+    # docker | systemd (native Node.js/Python releases) | compose
     runtime: Mapped[str] = mapped_column(String(16), server_default="docker")
 
     # Source: a Git repository built with a Dockerfile, or a prebuilt image.
@@ -40,6 +41,10 @@ class Application(Base):
     # Only used when the repository has no Dockerfile (detected builds).
     build_command: Mapped[str | None] = mapped_column(String(500))
     start_command: Mapped[str | None] = mapped_column(String(500))
+    # Compose apps: the file (found automatically when empty) and the service
+    # that receives traffic (needed when there's more than one).
+    compose_file: Mapped[str | None] = mapped_column(String(200))
+    compose_service: Mapped[str | None] = mapped_column(String(63))
     # Linked GitHub repository (via the GitHub App), for private clones and
     # deploy-on-push.
     github_installation_id: Mapped[int | None] = mapped_column(BigInteger)

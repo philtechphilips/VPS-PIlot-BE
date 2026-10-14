@@ -1,4 +1,7 @@
-"""Docker deployments, run by the privileged helper (root).
+"""Deployments, run by the privileged helper (root).
+
+Three runtimes share this entry point: Docker (below), native systemd
+releases (native.py) and Docker Compose projects (compose.py).
 
 One deployment: fetch the source (shallow Git checkout or image pull), build
 an image tagged with the commit, start it as a *candidate* on a loopback
@@ -40,6 +43,8 @@ GIT_URL_RE = re.compile(r"^https://[A-Za-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9._~/-]+$")
 REF_RE = re.compile(r"^[A-Za-z0-9._/][A-Za-z0-9._/-]{0,199}$")
 IMAGE_RE = re.compile(r"^[a-z0-9][a-z0-9._/:@-]{0,299}$")
 PATH_RE = re.compile(r"^[A-Za-z0-9._-][A-Za-z0-9._/-]{0,199}$")
+SERVICE_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$")
+RUNTIMES = ("docker", "systemd", "compose")
 HEALTH_RE = re.compile(r"^/[A-Za-z0-9._~/?=&%-]{0,199}$")
 CPUS_RE = re.compile(r"^\d{1,2}(\.\d{1,2})?$")
 MEMORY_RE = re.compile(r"^\d{1,6}[kmg]$")
@@ -102,8 +107,22 @@ def validate(args: dict[str, Any]) -> dict[str, Any]:
             "image": _match(IMAGE_RE, source.get("image"), "image"),
             "pull": bool(source.get("pull", True)),
         }
+    elif source.get("type") == "release":
+        # Rollback of a native or Compose app: a release kept on the server.
+        clean_source = {
+            "type": "release",
+            "release": _match(HEX_RE, source.get("release"), "release"),
+        }
     else:
         raise Rejected("invalid source")
+    runtime = args.get("runtime", "docker")
+    if runtime not in RUNTIMES:
+        raise Rejected("invalid runtime")
+    allowed = {"docker": ("git", "image"), "systemd": ("git", "release")}
+    if clean_source["type"] not in allowed.get(runtime, ("git", "release")):
+        raise Rejected(f"invalid source for the {runtime} runtime")
+    compose_file = args.get("compose_file")
+    compose_service = args.get("compose_service")
     env = args.get("env") or {}
     if not isinstance(env, dict) or len(env) > 101:
         raise Rejected("invalid env")
@@ -143,6 +162,13 @@ def validate(args: dict[str, Any]) -> dict[str, Any]:
         raise Rejected("invalid secret keys")
     cpus, memory = args.get("cpus"), args.get("memory")
     return {
+        "runtime": runtime,
+        "compose_file": _match(PATH_RE, compose_file, "compose file")
+        if compose_file is not None
+        else None,
+        "compose_service": _match(SERVICE_RE, compose_service, "compose service")
+        if compose_service is not None
+        else None,
         "app": _match(APP_RE, args.get("app"), "app name"),
         "deployment_id": _match(HEX_RE, args.get("deployment_id"), "deployment id"),
         "source": clean_source,
@@ -373,13 +399,21 @@ def _loopback_port(name: str, container_port: int) -> int | None:
     return None
 
 
-def _healthy(name: str, port: int, path: str, timeout: int, emit: Emit) -> bool:
+def _healthy(
+    name: str,
+    port: int,
+    path: str,
+    timeout: int,
+    emit: Emit,
+    alive: Callable[[], bool] | None = None,
+    what: str = "The container",
+) -> bool:
     url = f"http://127.0.0.1:{port}{path}"
     deadline = time.monotonic() + timeout
     last = ""
     while time.monotonic() < deadline:
-        if not _running(name):
-            emit("error", "The container exited")
+        if not (alive() if alive else _running(name)):
+            emit("error", f"{what} exited")
             return False
         try:
             with urllib.request.urlopen(url, timeout=5) as response:
@@ -584,6 +618,8 @@ def deploy(args: dict[str, Any], emit: Emit) -> dict[str, Any]:
         emit(level, redact(message))
 
     app = spec["app"]
+    if spec["runtime"] != "docker":
+        return _deploy_other(spec, say, redact)
     live = f"vp-{app}"
     candidate = f"vp-{app}-candidate"
     previous = f"vp-{app}-previous"
@@ -707,8 +743,38 @@ def deploy(args: dict[str, Any], emit: Emit) -> dict[str, Any]:
             os.unlink(env_file)
 
 
+def _deploy_other(spec: dict[str, Any], say: Emit, redact: Redactor) -> dict[str, Any]:
+    from vpspilot_agent import compose, native
+
+    module = native if spec["runtime"] == "systemd" else compose
+    workdir = os.path.join(APPS_DIR, spec["app"])
+    os.makedirs(workdir, mode=0o700, exist_ok=True)
+    os.chmod(APPS_DIR, 0o700)
+    try:
+        if spec["runtime"] == "compose" and shutil.which("docker") is None:
+            raise Failed("Docker isn't installed on this server")
+        if spec["source"]["type"] == "git" and shutil.which("git") is None:
+            raise Failed("git isn't installed on this server")
+        result = module.deploy(spec, say, redact)
+        return {"exit_code": 0, "output": "", "result": result}
+    except Failed as error:
+        say("error", str(error))
+        return {
+            "exit_code": 1,
+            "output": "",
+            "error": str(error),
+            "result": {"build_plan": f"{spec['runtime']}"},
+        }
+    except OSError as error:
+        say("error", f"{type(error).__name__}: {error}")
+        return {"exit_code": 1, "output": "", "error": str(error)[:400]}
+
+
 def remove(args: dict[str, Any], emit: Emit) -> dict[str, Any]:
+    from vpspilot_agent import compose, native
+
     app = _match(APP_RE, args.get("app"), "app name")
+    native.remove(app, emit)
     if shutil.which("docker") is not None:
         code, out = _run(
             ["docker", "ps", "-a", "-q", "--filter", f"label=vpspilot.app={app}"],
@@ -731,6 +797,8 @@ def remove(args: dict[str, Any], emit: Emit) -> dict[str, Any]:
         )
         for ref in out.split() if code == 0 else []:
             _run(["docker", "image", "rm", "-f", ref], timeout=60)
+        if compose.available():
+            compose.remove(app, emit)
     shutil.rmtree(os.path.join(APPS_DIR, app), ignore_errors=True)
     emit("info", f"Removed {app}")
     return {"exit_code": 0, "output": f"Removed {app}"}
@@ -757,7 +825,28 @@ def app_logs(args: dict[str, Any]) -> dict[str, Any]:
     since = args.get("since")
     if since is not None:
         _match(SINCE_RE, since, "since")
+    runtime = args.get("runtime", "docker")
+    if runtime not in RUNTIMES:
+        raise Rejected("invalid runtime")
+    if runtime == "systemd":
+        from vpspilot_agent import native
+
+        state, started, restarts = native.status(app)
+        body = {
+            "state": state,
+            "started_at": started,
+            "restarts": restarts,
+            "lines": native.logs(app, lines, since) if state != "missing" else [],
+        }
+        text = json.dumps(body)
+        while len(text) > MAX_LOG_JSON and body["lines"]:
+            body["lines"] = body["lines"][len(body["lines"]) // 4 + 1 :]
+            text = json.dumps(body)
+        return {"exit_code": 0, "output": text}
     name = f"vp-{app}"
+    if runtime == "compose":
+        service = _match(SERVICE_RE, args.get("service"), "service")
+        name = f"vp-{app}-{service}-1"
     code, out = _run(
         [
             "docker",
