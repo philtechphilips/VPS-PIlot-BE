@@ -2,12 +2,13 @@ from datetime import datetime
 from typing import Annotated, Literal, NoReturn
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field, StringConstraints
 from sqlalchemy import func, select
 
 from app.audit import service as audit
 from app.auth.dependencies import AdminUser
-from app.backups import service
+from app.backups import gdrive, service
 from app.backups.models import BackupRun
 from app.core.database import DbSession
 from app.databases import service as databases
@@ -61,6 +62,20 @@ class SettingsIn(BaseModel):
     access_key: Annotated[str, StringConstraints(max_length=200)] | None = None
     secret_key: Annotated[str, StringConstraints(max_length=200)] | None = None
     keep_local: bool | None = None
+    provider: Literal["s3", "gdrive"] | None = None
+    gdrive_client_id: (
+        Annotated[
+            str,
+            StringConstraints(
+                strip_whitespace=True,
+                pattern=r"^[A-Za-z0-9-]{5,120}\.apps\.googleusercontent\.com$",
+            ),
+        ]
+        | None
+    ) = None
+    gdrive_client_secret: (
+        Annotated[str, StringConstraints(strip_whitespace=True, max_length=200)] | None
+    ) = None
 
 
 def _run_out(db, run: BackupRun) -> dict:
@@ -96,6 +111,15 @@ def _settings_out(row) -> dict:
         "prefix": row.prefix,
         "has_credentials": bool(row.access_key and row.secret_key),
         "keep_local": row.keep_local,
+        "provider": row.provider or "s3",
+        "gdrive": {
+            "client_id": row.gdrive_client_id,
+            "has_secret": bool(row.gdrive_client_secret),
+            "connected": bool(row.gdrive_refresh_token),
+            "account": row.gdrive_account,
+            "folder_id": row.gdrive_folder_id,
+            "redirect_uri": gdrive.redirect_uri(),
+        },
         "updated_at": row.updated_at,
     }
 
@@ -330,3 +354,66 @@ def test_settings(
     except service.BackupError as error:
         _raise(error)
     return {"job_id": job.id}
+
+
+# ---------------------------------------------------------------------------
+# Google Drive sign-in
+# ---------------------------------------------------------------------------
+
+
+@router.post("/gdrive/connect")
+def gdrive_connect(db: DbSession, user: AdminUser):
+    """The Google consent URL; the browser comes back to /gdrive/callback."""
+    try:
+        return {"url": gdrive.auth_url(service.get_settings(db), user.id)}
+    except gdrive.DriveError as error:
+        raise HTTPException(error.status_code, error.detail) from None
+
+
+@router.get("/gdrive/callback", include_in_schema=False)
+def gdrive_callback(
+    request: Request,
+    db: DbSession,
+    state: Annotated[str, Query(max_length=1000)] = "",
+    code: Annotated[str, Query(max_length=2000)] = "",
+    error: Annotated[str, Query(max_length=200)] = "",
+):
+    """Google redirects here after consent. No session cookie comes along,
+    so the signed, expiring state says who started it."""
+    from app.core.config import settings
+    from app.users.models import Role, User
+
+    back = f"{settings.frontend_url.rstrip('/')}/dashboard/settings"
+    try:
+        user = db.get(User, gdrive.read_state(state))
+        if user is None or user.role != Role.ADMIN:
+            raise gdrive.DriveError(403, "Only admins can connect storage")
+        if error or not code:
+            raise gdrive.DriveError(400, "Google sign-in was cancelled")
+        row = service.get_settings(db)
+        gdrive.connect(row, code)
+        row.provider = "gdrive"
+        row.storage_enabled = True
+        db.commit()
+    except gdrive.DriveError as failure:
+        db.rollback()
+        from urllib.parse import quote
+
+        return RedirectResponse(
+            f"{back}?gdrive_error={quote(failure.detail)}#storage", 303
+        )
+    _audit(
+        db, user, request, "backup.settings", "storage",
+        f"Google Drive connected ({row.gdrive_account or 'account'})", result="success",
+    )  # fmt: skip
+    return RedirectResponse(f"{back}?gdrive=connected#storage", 303)
+
+
+@router.delete("/gdrive/connection")
+def gdrive_disconnect(request: Request, db: DbSession, user: AdminUser):
+    """Revoke VPSPilot's access. Backups already in Drive stay there."""
+    row = service.get_settings(db)
+    gdrive.disconnect(db, row)
+    _audit(db, user, request, "backup.settings", "storage", "Google Drive disconnected",
+           result="success")  # fmt: skip
+    return _settings_out(row)

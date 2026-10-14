@@ -62,33 +62,43 @@ def update_settings(db: Session, data: dict[str, Any]) -> BackupSettings:
     row = get_settings(db)
     for field in (
         "storage_enabled",
+        "provider",
         "endpoint",
         "region",
         "bucket",
         "prefix",
         "keep_local",
+        "gdrive_client_id",
     ):
         if field in data and data[field] is not None:
             setattr(row, field, data[field])
-    for field in ("access_key", "secret_key"):
+    for field in ("access_key", "secret_key", "gdrive_client_secret"):
         if data.get(field):
             setattr(row, field, encrypt_secret(data[field], PURPOSE))
-    if row.storage_enabled and not (
-        row.endpoint and row.bucket and row.access_key and row.secret_key
-    ):
+    if row.storage_enabled and _config(row, row.provider) is None:
+        db.rollback()
         raise BackupError(
             422,
-            "Fill in the endpoint, bucket and both keys to turn on off-host storage",
+            "Connect Google Drive first"
+            if row.provider == "gdrive"
+            else "Fill in the endpoint, bucket and both keys to turn on off-host "
+            "storage",
         )
     row.updated_at = _now()
     db.commit()
     return row
 
 
-def _storage(row: BackupSettings) -> dict[str, Any] | None:
-    if not row.storage_enabled:
+def _config(row: BackupSettings, provider: str) -> dict[str, Any] | None:
+    """Storage for jobs, when that provider is set up."""
+    if provider == "gdrive":
+        if not (row.gdrive_refresh_token and row.gdrive_folder_id):
+            return None
+        return {"provider": "gdrive", "folder_id": row.gdrive_folder_id}
+    if not (row.endpoint and row.bucket and row.access_key and row.secret_key):
         return None
     return {
+        "provider": "s3",
         "endpoint": row.endpoint.rstrip("/"),
         "region": row.region or "auto",
         "bucket": row.bucket,
@@ -96,10 +106,30 @@ def _storage(row: BackupSettings) -> dict[str, Any] | None:
     }
 
 
+def _storage(row: BackupSettings) -> dict[str, Any] | None:
+    """Where new backups are copied (None: kept on the server only)."""
+    return _config(row, row.provider) if row.storage_enabled else None
+
+
+def _storage_of(row: BackupSettings, run: BackupRun) -> dict[str, Any] | None:
+    """Where an existing backup's remote copy lives."""
+    if not run.remote_key:
+        return None
+    return _config(row, run.storage or "s3")
+
+
 def job_secrets(db: Session, job: Job) -> dict[str, Any]:
     row = get_settings(db)
     out: dict[str, Any] = {"backup_key": decrypt_secret(row.encryption_key, PURPOSE)}
-    if job.payload.get("storage") and row.access_key and row.secret_key:
+    storage = job.payload.get("storage") or {}
+    if storage.get("provider") == "gdrive":
+        from app.backups import gdrive
+
+        try:
+            out["gdrive_token"] = gdrive.access_token(row)
+        except gdrive.DriveError:
+            pass  # the agent reports the missing access
+    elif storage and row.access_key and row.secret_key:
         out["s3_access_key"] = decrypt_secret(row.access_key, PURPOSE)
         out["s3_secret_key"] = decrypt_secret(row.secret_key, PURPOSE)
     instance = db.get(DatabaseInstance, job.payload.get("instance_id") or "")
@@ -281,7 +311,8 @@ def _restore_job(
         raise BackupError(
             409, "Restore external Redis by hand; VPSPilot replaces data it runs"
         )
-    target, storage, _ = _target_and_storage(db, instance)
+    target = databases.target(instance)
+    storage = _storage_of(get_settings(db), run)
     payload: dict[str, Any] = {
         "target": target,
         "instance_id": instance.id,
@@ -339,16 +370,20 @@ def delete_runs(db: Session, runs: list[BackupRun], actor: str, label: str) -> N
     for instance_id, items in by_instance.items():
         instance = db.get(DatabaseInstance, instance_id)
         server = db.get(Server, instance.server_id) if instance else None
-        files = [
-            {"path": r.path, "remote_key": r.remote_key}
-            for r in items
-            if r.path or r.remote_key
-        ]
-        if server and files:
-            row = get_settings(db)
-            payload: dict[str, Any] = {"items": files, "has_secrets": True}
-            if _storage(row):
-                payload["storage"] = _storage(row)
+        row = get_settings(db)
+        # One job per place the remote copies live (local files go with any).
+        groups: dict[str, list[BackupRun]] = {}
+        for r in items:
+            if r.path or r.remote_key:
+                groups.setdefault(r.storage or "s3", []).append(r)
+        for provider, group in groups.items() if server else ():
+            payload: dict[str, Any] = {
+                "items": [{"path": r.path, "remote_key": r.remote_key} for r in group],
+                "has_secrets": True,
+            }
+            storage = _config(row, provider)
+            if storage:
+                payload["storage"] = storage
             try:
                 jobs.create(
                     db, server, "backup.delete", payload, actor, label, audited=False
@@ -446,6 +481,9 @@ def on_job_finished(db: Session, job: Job) -> None:
         if ok:
             run.status = "succeeded"
             run.path, run.remote_key = result.get("path"), result.get("remote_key")
+            run.storage = (
+                (result.get("storage") or "s3")[:16] if run.remote_key else None
+            )
             run.size, run.sha256 = result.get("size"), result.get("sha256")
             db.flush()
             _prune(db, run.instance_id, run.database)

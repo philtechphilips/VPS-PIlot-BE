@@ -72,9 +72,9 @@ def test_settings_keep_secrets_secret(client, admin_headers, db: Session):
         },
         headers=admin_headers,
     ).json()
-    assert good["has_credentials"] is True and "secret" not in str(good).replace(
-        "has_credentials", ""
-    )
+    assert good["has_credentials"] is True
+    assert "s3cr3t-value" not in str(good) and "AKIAEXAMPLE" not in str(good)
+    assert good["provider"] == "s3" and good["gdrive"]["connected"] is False
     db.refresh(row)
     assert "s3cr3t-value" not in (row.secret_key or "")
 
@@ -99,6 +99,7 @@ def test_backup_run_secrets_and_result(client, admin_headers, db: Session):
     assert [r["database"] for r in runs] == ["main"]
     job = claim(client, agent)
     assert job["payload"]["storage"] == {
+        "provider": "s3",
         "endpoint": "https://s3.example.com",
         "region": "us-east-1",
         "bucket": "my-backups",

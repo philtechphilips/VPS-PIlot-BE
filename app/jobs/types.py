@@ -358,7 +358,13 @@ class ProxyStatusPayload(Strict):
     hosts: Annotated[list[ProxyHost], Field(max_length=200)]
 
 
-class BackupStorage(Strict):
+class DriveStorage(Strict):
+    provider: Literal["gdrive"]
+    folder_id: Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]{10,200}$")]
+
+
+class S3Storage(Strict):
+    provider: Literal["s3"] = "s3"
     endpoint: Annotated[
         str, StringConstraints(pattern=r"^https?://[A-Za-z0-9.-]+(:\d{1,5})?$")
     ]
@@ -367,6 +373,13 @@ class BackupStorage(Strict):
         str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
     ]
     prefix: Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9._/-]{0,200}$")] = ""
+
+
+# Older payloads (no provider) are S3.
+BackupStorage = Annotated[
+    S3Storage | DriveStorage,
+    Field(discriminator="provider"),
+]
 
 
 BackupPath = Annotated[str, StringConstraints(pattern=r"^/[A-Za-z0-9._/-]{1,400}$")]

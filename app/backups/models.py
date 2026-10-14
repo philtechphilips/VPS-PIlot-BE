@@ -23,6 +23,14 @@ class BackupSettings(Base):
     access_key: Mapped[str | None] = mapped_column(Text)  # encrypted
     secret_key: Mapped[str | None] = mapped_column(Text)  # encrypted
     keep_local: Mapped[bool] = mapped_column(server_default=true())
+    # Where off-host copies go: "s3" (any S3-compatible service) or "gdrive".
+    provider: Mapped[str] = mapped_column(String(16), server_default="s3")
+    # Google Drive through the owner's OAuth client (drive.file scope).
+    gdrive_client_id: Mapped[str | None] = mapped_column(String(200))
+    gdrive_client_secret: Mapped[str | None] = mapped_column(Text)  # encrypted
+    gdrive_refresh_token: Mapped[str | None] = mapped_column(Text)  # encrypted
+    gdrive_account: Mapped[str | None] = mapped_column(String(200))
+    gdrive_folder_id: Mapped[str | None] = mapped_column(String(200))
     updated_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
 
 
@@ -61,6 +69,8 @@ class BackupRun(Base):
     job_id: Mapped[str | None] = mapped_column(String(32))
     path: Mapped[str | None] = mapped_column(String(500))
     remote_key: Mapped[str | None] = mapped_column(String(500))
+    # Which storage holds remote_key (runs before this existed: S3).
+    storage: Mapped[str | None] = mapped_column(String(16))
     size: Mapped[int | None] = mapped_column(BigInteger)
     sha256: Mapped[str | None] = mapped_column(String(64))
     error: Mapped[str | None] = mapped_column(String(500))
