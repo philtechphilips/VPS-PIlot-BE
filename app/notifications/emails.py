@@ -75,3 +75,27 @@ def send_deployment_email(to: str, d: dict) -> None:
     text_rows = "\n".join(f"{k}: {v}" for k, v in rows if v)
     text = f"{heading}\n\n{plain}\n\n{text_rows}\n\n{d['url']}\n"
     mailer.send_email(to, subject, html, text)
+
+
+def send_alert_email(to: str, d: dict) -> None:
+    firing = d["firing"]
+    if firing:
+        subject = f"[{d['severity']}] {d['title']}"
+        chip, heading = f"Alert · {d['severity']}", d["title"]
+        note = _note(
+            "You'll get one more email when it resolves. Acknowledge it in Monitoring to show you're on it."
+        )
+    else:
+        subject = f"Resolved: {d['title']}"
+        chip, heading = "Resolved", f"Resolved: {d['title']}"
+        note = _note(f"It lasted {d['duration']}.") if d["duration"] else ""
+    intro = d["detail"] or ("The condition is back to normal." if not firing else "")
+    html = _layout(
+        preheader=f"{heading}. {intro}",
+        chip=chip,
+        heading=heading,
+        intro=escape(intro),
+        body=f'<div style="margin:24px 0 22px">{_button("Open Monitoring", d["url"])}</div>{note}',
+    )
+    text = f"{heading}\n\n{intro}\n\n{d['url']}\n"
+    mailer.send_email(to, subject, html, text)

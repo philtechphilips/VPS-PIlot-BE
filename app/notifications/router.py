@@ -40,11 +40,13 @@ class SettingsOut(BaseModel):
     email: str
     email_deploy_success: bool
     email_deploy_failure: bool
+    email_alerts: bool
 
 
 class SettingsIn(BaseModel):
     email_deploy_success: bool | None = None
     email_deploy_failure: bool | None = None
+    email_alerts: bool | None = None
 
 
 @router.get("", response_model=Inbox)
@@ -65,6 +67,7 @@ def _settings_out(user, prefs) -> SettingsOut:
         email=user.email,
         email_deploy_success=prefs.email_deploy_success,
         email_deploy_failure=prefs.email_deploy_failure,
+        email_alerts=prefs.email_alerts,
     )
 
 

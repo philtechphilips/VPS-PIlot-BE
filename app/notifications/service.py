@@ -35,7 +35,10 @@ def get_settings(db: Session, user_id: int) -> NotificationSettings:
     prefs = db.get(NotificationSettings, user_id)
     if prefs is None:
         prefs = NotificationSettings(
-            user_id=user_id, email_deploy_success=True, email_deploy_failure=True
+            user_id=user_id,
+            email_deploy_success=True,
+            email_deploy_failure=True,
+            email_alerts=True,
         )
         db.add(prefs)
         db.flush()
@@ -46,7 +49,7 @@ def update_settings(
     db: Session, user_id: int, data: dict[str, bool]
 ) -> NotificationSettings:
     prefs = get_settings(db, user_id)
-    for key in ("email_deploy_success", "email_deploy_failure"):
+    for key in ("email_deploy_success", "email_deploy_failure", "email_alerts"):
         if key in data and data[key] is not None:
             setattr(prefs, key, bool(data[key]))
     db.commit()
@@ -187,3 +190,57 @@ def mark_read(db: Session, user_id: int, ids: list[str] | None) -> None:
         query = query.where(Notification.id.in_(ids))
     db.execute(query.values(read_at=_now()))
     db.commit()
+
+
+def _send_alert(to: str, data: dict[str, Any]) -> None:
+    try:
+        emails.send_alert_email(to, data)
+    except EmailDeliveryError as error:
+        logger.warning("Alert email to %s not sent: %s", to, error)
+    except Exception:  # noqa: BLE001
+        logger.exception("Alert email to %s failed", to)
+
+
+def alert_changed(
+    db: Session,
+    *,
+    firing: bool,
+    severity: str,
+    title: str,
+    detail: str | None,
+    email: bool,
+    started_at: datetime,
+) -> None:
+    """An alert fired or resolved: inbox for every admin, email if wanted."""
+    level = (
+        (
+            "err"
+            if severity == "critical"
+            else "warn"
+            if severity == "warning"
+            else "info"
+        )
+        if firing
+        else "ok"
+    )
+    users = notify(
+        db,
+        "alert.firing" if firing else "alert.resolved",
+        level,
+        title if firing else f"Resolved: {title}",
+        detail,
+        "/dashboard/monitoring",
+    )
+    if not email:
+        return
+    data = {
+        "firing": firing,
+        "severity": severity,
+        "title": title,
+        "detail": detail or "",
+        "duration": _duration(started_at, _now()),
+        "url": f"{settings.frontend_url.rstrip('/')}/dashboard/monitoring",
+    }
+    for user in users:
+        if get_settings(db, user.id).email_alerts:
+            _background(_send_alert, user.email, data)

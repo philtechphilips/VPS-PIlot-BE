@@ -1,4 +1,5 @@
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,6 +10,8 @@ from app.auth.router import router as auth_router
 from app.core.config import settings
 from app.github.router import router as github_router
 from app.jobs.router import router as jobs_router
+from app.monitoring import worker as monitoring_worker
+from app.monitoring.router import router as monitoring_router
 from app.notifications.router import router as notifications_router
 from app.servers.agent_router import router as agent_router
 from app.servers.router import router as servers_router
@@ -23,7 +26,15 @@ if not _app_logger.handlers:
     _app_logger.addHandler(_handler)
     _app_logger.setLevel(logging.INFO)
 
-app = FastAPI(title=settings.project_name)
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    monitoring_worker.start()
+    yield
+    monitoring_worker.stop()
+
+
+app = FastAPI(title=settings.project_name, lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -42,6 +53,7 @@ app.include_router(audit_router)
 app.include_router(apps_router)
 app.include_router(github_router)
 app.include_router(notifications_router)
+app.include_router(monitoring_router)
 
 
 @app.get("/")

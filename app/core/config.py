@@ -57,6 +57,8 @@ class Settings(BaseSettings):
     agent_offline_after_seconds: int = 35
     enrollment_token_expire_minutes: int = 15
     metrics_retention_days: int = 7
+    # Alert rules are evaluated in the API process this often (0 disables).
+    alerts_evaluate_seconds: int = 30
 
     # Used to build links in emails, e.g. the password reset link
     frontend_url: str = "http://localhost:3000"

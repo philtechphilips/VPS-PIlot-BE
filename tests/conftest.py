@@ -14,6 +14,11 @@ os.environ.update(
     SECRET_KEY=secrets.token_hex(32),
     RESEND_API_KEY="",
     EMAIL_OVERRIDE_TO="",
+    ENCRYPTION_KEY="",
+    ENCRYPTION_KEYS_PREVIOUS="",
+    PUBLIC_API_URL="",
+    # Tests call monitoring.service.evaluate() directly.
+    ALERTS_EVALUATE_SECONDS="0",
 )
 
 from dataclasses import dataclass  # noqa: E402
