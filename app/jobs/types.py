@@ -84,6 +84,13 @@ Port = Annotated[int, Field(ge=1, le=65535)]
 HostPort = Annotated[int, Field(ge=1024, le=65535)]
 Cpus = Annotated[str, StringConstraints(pattern=r"^\d{1,2}(\.\d{1,2})?$")]
 Memory = Annotated[str, StringConstraints(pattern=r"^\d{1,6}[kmg]$")]
+# A single-line shell command run inside the build/app container.
+Command = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True, min_length=1, max_length=500, pattern=r"^[^\r\n]+$"
+    ),
+]
 
 
 class GitSource(Strict):
@@ -114,6 +121,9 @@ class AppDeployPayload(Strict):
     # The agent fetches env values for this job over its authenticated
     # channel; they are never stored in the job payload.
     has_env: bool = False
+    # For repositories without a Dockerfile: override the detected commands.
+    build_command: Command | None = None
+    start_command: Command | None = None
 
 
 class AppRemovePayload(Strict):

@@ -27,6 +27,9 @@ class Application(Base):
     dockerfile: Mapped[str] = mapped_column(String(200), server_default="Dockerfile")
     build_context: Mapped[str] = mapped_column(String(200), server_default=".")
     image: Mapped[str | None] = mapped_column(String(300))
+    # Only used when the repository has no Dockerfile (detected builds).
+    build_command: Mapped[str | None] = mapped_column(String(500))
+    start_command: Mapped[str | None] = mapped_column(String(500))
 
     container_port: Mapped[int]
     host_port: Mapped[int]

@@ -145,6 +145,8 @@ def create_app(db: Session, server: Server, data: dict[str, Any]) -> Application
         image=source.get("image"),
         dockerfile=data.get("dockerfile") or "Dockerfile",
         build_context=data.get("build_context") or ".",
+        build_command=data.get("build_command"),
+        start_command=data.get("start_command"),
         container_port=data["container_port"],
         host_port=host_port,
         health_path=data.get("health_path") or "/",
@@ -166,6 +168,8 @@ def update_settings(db: Session, app: Application, data: dict[str, Any]) -> Appl
         "image",
         "dockerfile",
         "build_context",
+        "build_command",
+        "start_command",
         "container_port",
         "health_path",
         "health_timeout_seconds",
@@ -202,6 +206,8 @@ def _payload(
         "cpus": app.cpu_limit,
         "memory": app.memory_limit,
         "has_env": True,
+        "build_command": app.build_command,
+        "start_command": app.start_command,
     }
 
 
@@ -362,6 +368,12 @@ def on_job_finished(db: Session, job: Job) -> None:
         return
     deployment.finished_at = job.finished_at or _now()
     result = job.result or {}
+    if result.get("build_plan"):
+        # How it was built (Dockerfile or the detected stack), for display.
+        deployment.spec = {
+            **(deployment.spec or {}),
+            "build_plan": str(result["build_plan"])[:120],
+        }
     if job.status == "succeeded":
         deployment.status = "succeeded"
         deployment.commit_sha = result.get("commit_sha") or deployment.commit_sha

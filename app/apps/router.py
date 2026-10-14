@@ -61,6 +61,8 @@ def _app_out(db, app: Application) -> AppOut:
         image=app.image,
         dockerfile=app.dockerfile,
         build_context=app.build_context,
+        build_command=app.build_command,
+        start_command=app.start_command,
         container_port=app.container_port,
         host_port=app.host_port,
         health_path=app.health_path,

@@ -4,6 +4,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from app.jobs.types import (
+    Command,
     Cpus,
     GitRef,
     GitUrl,
@@ -42,6 +43,8 @@ class AppCreate(BaseModel):
     source: GitSourceIn | ImageSourceIn = Field(discriminator="type")
     dockerfile: RelPath = "Dockerfile"
     build_context: RelPath = "."
+    build_command: Command | None = None
+    start_command: Command | None = None
     container_port: Port
     host_port: HostPort | None = None
     health_path: HealthPath = "/"
@@ -57,6 +60,8 @@ class AppUpdate(BaseModel):
     image: ImageRef | None = None
     dockerfile: RelPath | None = None
     build_context: RelPath | None = None
+    build_command: Command | None = None
+    start_command: Command | None = None
     container_port: Port | None = None
     health_path: HealthPath | None = None
     health_timeout_seconds: Annotated[int, Field(ge=5, le=600)] | None = None
@@ -116,6 +121,8 @@ class AppOut(BaseModel):
     image: str | None
     dockerfile: str
     build_context: str
+    build_command: str | None
+    start_command: str | None
     container_port: int
     host_port: int
     health_path: str
