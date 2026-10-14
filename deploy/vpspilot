@@ -5,7 +5,7 @@
 #   vpspilot logs [api|web|db|proxy]
 #   vpspilot upgrade           fetch the latest code, rebuild, restart
 #                              (database migrations run on start)
-#   vpspilot restart
+#   vpspilot restart           apply .env changes (recreates api and web)
 #   vpspilot backup [DIR]      dump the control-plane database and its keys
 #   vpspilot restore FILE      restore a dump made by `vpspilot backup`
 set -euo pipefail
@@ -50,8 +50,9 @@ case "${1:-status}" in
     echo "==> Done. Upgrade agents from each server's page (or re-run their install command)."
     ;;
   restart)
+    # Recreate (not just restart) so edits to .env take effect.
     need_root
-    compose restart
+    compose up -d --force-recreate api web
     ;;
   backup)
     need_root
