@@ -50,7 +50,16 @@ def send_deployment_email(to: str, d: dict) -> None:
         chip, heading = "Deployment failed", f"{app} failed to deploy"
         plain = (d["error"] or "The deployment didn't finish").strip()
         plain += "" if plain.endswith((".", "!", "?")) else "."
-        plain += " The previous version is still live." if d["had_previous"] else ""
+        # The agent's own messages often say this already.
+        already = any(
+            w in plain.lower()
+            for w in ("live version", "previous one", "previous version")
+        )
+        plain += (
+            " The previous version is still live."
+            if d["had_previous"] and not already
+            else ""
+        )
         intro = escape(plain)
         note = _note(
             "The build log shows the step that failed. Fix it and redeploy; nothing changed on the server."
