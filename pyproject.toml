@@ -69,6 +69,9 @@ ignore = ["UP047"]
 "app/auth/emails.py" = ["E501"]
 # The agent must run on the stock Python of Ubuntu 22.04 (3.10).
 "agent/**" = ["UP017"]
+# Generated Dockerfile lines, fixtures and user-facing hints read better unwrapped.
+"agent/vpspilot_agent/buildpacks.py" = ["UP017", "E501"]
+"tests/test_buildpacks.py" = ["E501"]
 
 [tool.ruff.lint.flake8-bugbear]
 # FastAPI's Depends()/Query() in defaults is idiomatic

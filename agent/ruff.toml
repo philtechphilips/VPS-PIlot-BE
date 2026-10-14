@@ -1,0 +1,4 @@
+# The agent runs on the stock Python of the server (Ubuntu 22.04 has 3.10),
+# so lint and format it for 3.10, not the control plane's version.
+extend = "../pyproject.toml"
+target-version = "py310"

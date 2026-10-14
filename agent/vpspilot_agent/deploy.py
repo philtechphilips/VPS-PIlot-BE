@@ -23,6 +23,7 @@ import urllib.request
 from collections.abc import Callable
 from typing import Any
 
+from vpspilot_agent import buildpacks
 from vpspilot_agent.errors import Rejected
 
 APPS_DIR = "/var/lib/vpspilot-apps"
@@ -39,6 +40,7 @@ HEALTH_RE = re.compile(r"^/[A-Za-z0-9._~/?=&%-]{0,199}$")
 CPUS_RE = re.compile(r"^\d{1,2}(\.\d{1,2})?$")
 MEMORY_RE = re.compile(r"^\d{1,6}[kmg]$")
 ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+MAX_COMMAND = 500
 
 GIT_TIMEOUT = 300
 BUILD_TIMEOUT = 20 * 60
@@ -110,6 +112,18 @@ def validate(args: dict[str, Any]) -> dict[str, Any]:
     timeout = args.get("health_timeout", 60)
     if not isinstance(timeout, int) or not 5 <= timeout <= 600:
         raise Rejected("invalid health timeout")
+    commands = {}
+    for name in ("build_command", "start_command"):
+        value = args.get(name)
+        if value is not None and (
+            not isinstance(value, str)
+            or not value.strip()
+            or len(value) > MAX_COMMAND
+            or "\n" in value
+            or "\r" in value
+        ):
+            raise Rejected(f"invalid {name.replace('_', ' ')}")
+        commands[name] = value.strip() if value else None
     secret_keys = args.get("secret_keys") or []
     if not isinstance(secret_keys, list) or not all(k in env for k in secret_keys):
         raise Rejected("invalid secret keys")
@@ -132,6 +146,7 @@ def validate(args: dict[str, Any]) -> dict[str, Any]:
         else None,
         "env": dict(env),
         "secret_keys": list(secret_keys),
+        **commands,
     }
 
 
@@ -405,23 +420,57 @@ def _builder_env() -> dict[str, str]:
     return {"DOCKER_BUILDKIT": "0"}
 
 
-def _build(spec: dict[str, Any], workdir: str, sha: str, emit: Emit) -> str:
+def _build(spec: dict[str, Any], workdir: str, sha: str, emit: Emit) -> tuple[str, str]:
+    """Build the image; returns (image, how it was built)."""
     src = os.path.join(workdir, "src")
     context = _inside(src, spec["context"])
     dockerfile = _inside(src, spec["dockerfile"])
-    if not os.path.isfile(dockerfile):
+    # Non-secret variables are passed as build args (by name only, so the
+    # values stay out of the process list); secrets are runtime-only.
+    build_args = [
+        k for k in spec["env"] if k not in spec["secret_keys"] and k != "PORT"
+    ]
+    if os.path.isfile(dockerfile):
+        method = f"Dockerfile ({spec['dockerfile']})"
+        if spec["build_command"] or spec["start_command"]:
+            emit("warn", "Build/start commands are ignored when a Dockerfile is used")
+    elif spec["dockerfile"] != "Dockerfile":
         raise Failed(f"No {spec['dockerfile']} in the repository")
-    image = f"{IMAGE_PREFIX}/{spec['app']}:{sha[:12]}"
+    else:
+        try:
+            plan = buildpacks.plan(
+                context, spec["build_command"], spec["start_command"], build_args
+            )
+        except buildpacks.Unsupported as error:
+            raise Failed(str(error)) from None
+        dockerfile = os.path.join(workdir, "Dockerfile.vpspilot")
+        with open(dockerfile, "w") as handle:
+            handle.write(plan.dockerfile)
+        buildpacks.write_dockerignore(context)
+        method = plan.stack
+        emit("step", f"No Dockerfile found: detected {plan.stack}")
+        for line in plan.dockerfile.splitlines():
+            emit("output", f"  {line}")
+    # The deployment id keeps each build distinct for rollbacks, even when
+    # settings changed but the commit didn't.
+    image = f"{IMAGE_PREFIX}/{spec['app']}:{sha[:12]}-{spec['deployment_id'][:6]}"
     emit("step", f"Building {image}")
+    cmd = ["docker", "build", "-t", image, "-f", dockerfile]
+    for key in build_args:
+        cmd += ["--build-arg", key]
     code, tail = _stream(
-        ["docker", "build", "-t", image, "-f", dockerfile, context],
+        [*cmd, context],
         emit,
         BUILD_TIMEOUT,
-        env={**_git_env(), **_builder_env()},
+        env={
+            **_git_env(),
+            **_builder_env(),
+            **{k: spec["env"][k] for k in build_args},
+        },
     )
     if code != 0:
         raise Failed("The image build failed")
-    return image
+    return image, method
 
 
 def _pull(image: str, pull: bool, emit: Emit) -> None:
@@ -460,7 +509,7 @@ def deploy(args: dict[str, Any], emit: Emit) -> dict[str, Any]:
     os.makedirs(workdir, mode=0o700, exist_ok=True)
     os.chmod(APPS_DIR, 0o700)
     env_file = None
-    sha = message = None
+    sha = message = method = None
     try:
         if shutil.which("docker") is None:
             raise Failed("Docker isn't installed on this server")
@@ -469,8 +518,9 @@ def deploy(args: dict[str, Any], emit: Emit) -> dict[str, Any]:
             if shutil.which("git") is None:
                 raise Failed("git isn't installed on this server")
             sha, message = _fetch(spec, workdir, say)
-            image = _build(spec, workdir, sha, say)
+            image, method = _build(spec, workdir, sha, say)
         else:
+            method = "Container image"
             image = source["image"]
             _pull(image, source["pull"], say)
 
@@ -543,6 +593,7 @@ def deploy(args: dict[str, Any], emit: Emit) -> dict[str, Any]:
                 "commit_sha": sha,
                 "commit_message": message,
                 "image_ref": image,
+                "build_plan": method,
             },
         }
     except Failed as error:
@@ -551,7 +602,11 @@ def deploy(args: dict[str, Any], emit: Emit) -> dict[str, Any]:
             "exit_code": 1,
             "output": "",
             "error": str(error),
-            "result": {"commit_sha": sha, "commit_message": message},
+            "result": {
+                "commit_sha": sha,
+                "commit_message": message,
+                "build_plan": method,
+            },
         }
     finally:
         if env_file and os.path.exists(env_file):
