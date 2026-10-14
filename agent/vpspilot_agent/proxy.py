@@ -96,6 +96,9 @@ def render(sites: list[dict[str, Any]], email: str | None) -> str:
     if HTTP_PORT != 80 or HTTPS_PORT != 443:
         lines += [f"\thttp_port {HTTP_PORT}", f"\thttps_port {HTTPS_PORT}"]
     lines += ["}", ""]
+    # Sites VPSPilot doesn't manage per app, e.g. the control plane itself
+    # when this server hosts it (written by deploy/install.sh).
+    lines += ["import /etc/caddy/extra/*.caddy", ""]
     for site in sites:
         address = f"http://{site['host']}" if site["tls"] == "off" else site["host"]
         lines.append(f"{address} {{")
@@ -150,7 +153,7 @@ def apply(args: dict[str, Any], emit: Emit) -> dict[str, Any]:
             "output": "",
             "error": "Docker isn't installed on this server",
         }
-    os.makedirs(DIR, mode=0o755, exist_ok=True)
+    os.makedirs(os.path.join(DIR, "extra"), mode=0o755, exist_ok=True)
     caddyfile = os.path.join(DIR, "Caddyfile")
     candidate = os.path.join(DIR, "Caddyfile.new")
     with open(candidate, "w") as handle:

@@ -400,4 +400,9 @@ def validate(job_type: str, payload: dict) -> dict:
         raise PolicyError(f"{unit} is managed by VPSPilot and can't be changed here")
     if unit in NO_STOP_UNITS and job_type == "service.stop":
         raise PolicyError("Stopping SSH could lock you out of the server")
+    container = data.get("container") or ""
+    if job_type == "container.stop" and container.startswith("vpspilot-"):
+        raise PolicyError(
+            f"{container} is part of VPSPilot; stopping it would cut you off"
+        )
     return data

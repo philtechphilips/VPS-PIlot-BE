@@ -1,0 +1,8 @@
+# The VPSPilot control plane (written by install.sh; not managed per app).
+__DOMAIN__ {
+	__TLS__
+	encode zstd gzip
+	@api path /api/* /agent/*
+	reverse_proxy @api vpspilot-api:8000
+	reverse_proxy vpspilot-web:3000
+}

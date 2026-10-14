@@ -104,7 +104,11 @@ def _service_logs(args: dict[str, Any]) -> dict[str, Any]:
 
 def _docker(verb: str) -> Callable[[dict[str, Any]], dict[str, Any]]:
     def op(args: dict[str, Any]) -> dict[str, Any]:
-        return _run(["docker", verb, _container(args)])
+        name = _container(args)
+        if verb == "stop" and name.startswith("vpspilot-"):
+            # The control plane and its proxy: stopping them cuts you off.
+            raise Rejected(f"{name} is part of VPSPilot and can't be stopped here")
+        return _run(["docker", verb, name])
 
     return op
 

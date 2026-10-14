@@ -1,0 +1,58 @@
+# VPSPilot control plane: PostgreSQL, the API and the dashboard.
+# Started by install.sh (and `vpspilot upgrade`); the public entry point is
+# the shared vpspilot-proxy (Caddy), which also serves your apps' domains.
+name: vpspilot
+
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: vpspilot-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DATABASE_USERNAME}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD}
+      POSTGRES_DB: ${DATABASE_NAME}
+    volumes:
+      - vpspilot-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [internal]
+
+  api:
+    build:
+      context: ..
+    image: vpspilot/api:local
+    container_name: vpspilot-api
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_HOSTNAME: vpspilot-db
+      DATABASE_PORT: "5432"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [internal, vpspilot]
+
+  web:
+    build:
+      context: ${WEB_SOURCE:-../../frontend}
+      args:
+        API_URL: http://vpspilot-api:8000
+    image: vpspilot/web:local
+    container_name: vpspilot-web
+    restart: unless-stopped
+    depends_on: [api]
+    networks: [internal, vpspilot]
+
+networks:
+  internal: {}
+  # Shared with the proxy, your apps and managed databases.
+  vpspilot:
+    external: true
+    name: vpspilot
+
+volumes:
+  vpspilot-db: {}

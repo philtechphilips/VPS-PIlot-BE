@@ -249,3 +249,51 @@ def test_failed_login_is_audited(client, db: Session):
     )
     entry = db.query(AuditLog).filter(AuditLog.action == "auth.login").one()
     assert entry.result == "failure" and entry.actor == "anonymous"
+
+
+def test_vpspilot_containers_cannot_be_stopped(client, admin_headers):
+    server_id, _ = enrolled_agent(client, admin_headers)
+    r = act(
+        client,
+        admin_headers,
+        server_id,
+        "container.stop",
+        {"container": "vpspilot-api"},
+    )
+    assert r.status_code == 403
+    assert (
+        act(
+            client,
+            admin_headers,
+            server_id,
+            "container.restart",
+            {"container": "vpspilot-proxy"},
+        ).status_code
+        == 202
+    )
+
+
+def test_control_plane_host_is_marked(client, admin_headers):
+    server_id, agent = enrolled_agent(client, admin_headers)
+    client.post(
+        "/agent/v1/inventory",
+        json={
+            "containers": [
+                {
+                    "id": "1",
+                    "name": "vpspilot-api",
+                    "image": "x",
+                    "state": "running",
+                    "status": "Up",
+                    "ports": "",
+                }
+            ]
+        },
+        headers=agent,
+    )
+    assert (
+        client.get(f"/api/v1/servers/{server_id}", headers=admin_headers).json()[
+            "is_control_plane"
+        ]
+        is True
+    )

@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# Manage the VPSPilot control plane on this server.
+#
+#   vpspilot status            containers and health
+#   vpspilot logs [api|web|db|proxy]
+#   vpspilot upgrade           fetch the latest code, rebuild, restart
+#                              (database migrations run on start)
+#   vpspilot restart
+#   vpspilot backup [DIR]      dump the control-plane database and its keys
+#   vpspilot restore FILE      restore a dump made by `vpspilot backup`
+set -euo pipefail
+
+ROOT="/opt/vpspilot"
+DEPLOY="$ROOT/api/deploy"
+ENV_FILE="$DEPLOY/.env"
+
+compose() { (cd "$DEPLOY" && WEB_SOURCE="$ROOT/web" docker compose --env-file .env "$@"); }
+need_root() { [ "$(id -u)" -eq 0 ] || { echo "Run as root (sudo)." >&2; exit 1; }; }
+
+case "${1:-status}" in
+  status)
+    compose ps
+    docker ps --filter name=vpspilot-proxy --format 'proxy\t{{.Status}}'
+    if docker exec vpspilot-api python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')" >/dev/null 2>&1; then
+      echo "API: healthy"
+    else
+      echo "API: not answering (vpspilot logs api)"
+    fi
+    ;;
+  logs)
+    case "${2:-api}" in
+      proxy) docker logs --tail 200 -f vpspilot-proxy ;;
+      *) compose logs --tail 200 -f "${2:-api}" ;;
+    esac
+    ;;
+  upgrade)
+    need_root
+    branch=$(git -C "$ROOT/api" rev-parse --abbrev-ref HEAD)
+    for name in api web; do
+      echo "==> Updating $name"
+      git -C "$ROOT/$name" fetch -q origin "$branch"
+      git -C "$ROOT/$name" checkout -q -B "$branch" "origin/$branch"
+    done
+    echo "==> Saving a database backup first"
+    "$0" backup >/dev/null
+    echo "==> Rebuilding and restarting"
+    compose up -d --build --remove-orphans
+    install -m 0755 "$DEPLOY/vpspilot" /usr/local/bin/vpspilot
+    docker exec vpspilot-proxy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1 || true
+    echo "==> Done. Upgrade agents from each server's page (or re-run their install command)."
+    ;;
+  restart)
+    need_root
+    compose restart
+    ;;
+  backup)
+    need_root
+    BACKUP_DIR="${2:-/var/backups/vpspilot}"
+    mkdir -p "$BACKUP_DIR"
+    chmod 700 "$BACKUP_DIR"
+    stamp=$(date -u +%Y%m%dT%H%M%SZ)
+    set -a
+    # shellcheck source=/dev/null
+    . "$ENV_FILE"
+    set +a
+    out="$BACKUP_DIR/vpspilot-$stamp.tar.gz"
+    tmp=$(mktemp -d)
+    docker exec vpspilot-db pg_dump -U "$DATABASE_USERNAME" -Fc "$DATABASE_NAME" > "$tmp/database.pgdump"
+    cp "$ENV_FILE" "$tmp/env"
+    tar -czf "$out" -C "$tmp" database.pgdump env
+    rm -rf "$tmp"
+    chmod 600 "$out"
+    echo "$out"
+    echo "This file holds the database and the keys that decrypt its secrets. Store it off the server." >&2
+    ;;
+  restore)
+    need_root
+    file="${2:?usage: vpspilot restore FILE}"
+    tmp=$(mktemp -d)
+    tar -xzf "$file" -C "$tmp"
+    cp "$tmp/env" "$ENV_FILE" && chmod 600 "$ENV_FILE"
+    set -a
+    # shellcheck source=/dev/null
+    . "$ENV_FILE"
+    set +a
+    compose up -d db
+    sleep 5
+    docker exec -i vpspilot-db pg_restore -U "$DATABASE_USERNAME" -d "$DATABASE_NAME" --clean --if-exists --no-owner < "$tmp/database.pgdump"
+    rm -rf "$tmp"
+    compose up -d
+    echo "Restored. The API and dashboard are restarting."
+    ;;
+  *)
+    sed -n '2,12p' "$0"
+    exit 2
+    ;;
+esac

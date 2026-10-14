@@ -217,6 +217,10 @@ def heartbeat(db: Session, server: Server, facts: dict[str, Any]) -> None:
 
 def store_inventory(db: Session, server: Server, inventory: dict[str, Any]) -> None:
     server.inventory = inventory
+    names = {str(c.get("name")) for c in inventory.get("containers") or []}
+    # The host running VPSPilot itself (deploy/compose.yaml) gets a badge and
+    # extra care in the UI.
+    server.is_control_plane = "vpspilot-api" in names
     server.inventory_at = _now()
     db.commit()
 
