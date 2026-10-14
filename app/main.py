@@ -3,8 +3,10 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.audit.router import router as audit_router
 from app.auth.router import router as auth_router
 from app.core.config import settings
+from app.jobs.router import router as jobs_router
 from app.servers.agent_router import router as agent_router
 from app.servers.router import router as servers_router
 from app.users.router import router as users_router
@@ -32,6 +34,8 @@ app.include_router(auth_router)
 app.include_router(users_router)
 app.include_router(servers_router)
 app.include_router(agent_router)
+app.include_router(jobs_router)
+app.include_router(audit_router)
 
 
 @app.get("/")

@@ -256,6 +256,7 @@ def latest_samples(db: Session, server_ids: list[str]) -> dict[str, MetricSample
         .group_by(MetricSample.server_id)
         .subquery()
     )
+
     rows = db.scalars(
         select(MetricSample).join(
             newest,

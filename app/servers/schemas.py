@@ -56,6 +56,8 @@ class AgentConfig(BaseModel):
     heartbeat_seconds: int
     metrics_seconds: int
     server_time: datetime
+    # Queued jobs waiting for this agent; it claims them right away.
+    jobs_pending: int = 0
 
 
 Percent = Annotated[float, Field(ge=0, le=100)]

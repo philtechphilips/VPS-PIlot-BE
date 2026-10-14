@@ -5,7 +5,9 @@ from sqlalchemy import create_engine, pool
 
 # Import every feature's models so autogenerate can see their tables.
 # Add a line here when you create a new feature.
+import app.audit.models  # noqa: F401
 import app.auth.models  # noqa: F401
+import app.jobs.models  # noqa: F401
 import app.servers.models  # noqa: F401
 import app.users.models  # noqa: F401
 from app.core.config import settings

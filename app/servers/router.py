@@ -1,7 +1,8 @@
 from typing import Annotated, NoReturn
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
 
+from app.audit import service as audit
 from app.auth.dependencies import AdminUser
 from app.core.database import DbSession
 from app.servers import service
@@ -62,6 +63,21 @@ def to_detail(server: Server, latest: MetricSample | None) -> ServerDetail:
     )
 
 
+def _audit(db, user, request: Request, action: str, server: Server) -> None:
+    actor, label = audit.user_actor(user)
+    audit.record(
+        db,
+        action=action,
+        result="success",
+        actor=actor,
+        actor_label=label,
+        target_type="server",
+        target_id=server.id,
+        target_label=server.name,
+        request=request,
+    )
+
+
 def _get(db, server_id: str) -> Server:
     server = service.get_server(db, server_id)
     if server is None:
@@ -81,12 +97,15 @@ def list_servers(db: DbSession, _: AdminUser):
     response_model=EnrollmentResponse,
     status_code=status.HTTP_201_CREATED,
 )
-def create_enrollment(body: EnrollmentCreate, db: DbSession, _: AdminUser):
+def create_enrollment(
+    body: EnrollmentCreate, request: Request, db: DbSession, user: AdminUser
+):
     """Register a server and issue a single-use install token."""
     try:
         server, token, expires_at = service.create_enrollment(db, body.name, body.tags)
     except service.ServerError as error:
         _raise(error)
+    _audit(db, user, request, "server.enrollment.create", server)
     return EnrollmentResponse(
         server=to_summary(server),
         token=token,
@@ -113,13 +132,16 @@ def get_metrics(
 
 
 @router.post("/{server_id}/enrollments", response_model=EnrollmentResponse)
-def reissue_enrollment(server_id: str, db: DbSession, _: AdminUser):
+def reissue_enrollment(
+    server_id: str, request: Request, db: DbSession, user: AdminUser
+):
     """New token for a server that hasn't enrolled yet (e.g. the old one expired)."""
     server = _get(db, server_id)
     try:
         token, expires_at = service.reissue_enrollment(db, server)
     except service.ServerError as error:
         _raise(error)
+    _audit(db, user, request, "server.enrollment.reissue", server)
     return EnrollmentResponse(
         server=to_summary(server),
         token=token,
@@ -129,14 +151,29 @@ def reissue_enrollment(server_id: str, db: DbSession, _: AdminUser):
 
 
 @router.post("/{server_id}/revoke", response_model=ServerDetail)
-def revoke_server(server_id: str, db: DbSession, _: AdminUser):
+def revoke_server(server_id: str, request: Request, db: DbSession, user: AdminUser):
     server = service.revoke(db, _get(db, server_id))
+    _audit(db, user, request, "server.revoke", server)
     return to_detail(server, service.latest_sample(db, server.id))
 
 
 @router.delete("/{server_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_server(server_id: str, db: DbSession, _: AdminUser):
+def delete_server(server_id: str, request: Request, db: DbSession, user: AdminUser):
+    server = _get(db, server_id)
+    name = server.name
     try:
-        service.remove(db, _get(db, server_id))
+        service.remove(db, server)
     except service.ServerError as error:
         _raise(error)
+    actor, label = audit.user_actor(user)
+    audit.record(
+        db,
+        action="server.remove",
+        result="success",
+        actor=actor,
+        actor_label=label,
+        target_type="server",
+        target_id=server_id,
+        target_label=name,
+        request=request,
+    )
