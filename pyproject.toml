@@ -75,6 +75,7 @@ ignore = ["UP047"]
 "agent/vpspilot_agent/databases.py" = ["UP017", "E501"]
 "agent/vpspilot_agent/logs.py" = ["UP017", "E501"]
 "agent/vpspilot_agent/proxy.py" = ["UP017", "E501"]
+"agent/vpspilot_agent/backups.py" = ["UP017", "E501"]
 "tests/test_buildpacks.py" = ["E501"]
 
 [tool.ruff.lint.flake8-bugbear]

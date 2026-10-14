@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 import app.apps.models  # noqa: F401  (register all tables)
 import app.audit.models  # noqa: F401
 import app.auth.models  # noqa: F401
+import app.backups.models  # noqa: F401
 import app.databases.models  # noqa: F401
 import app.github.models  # noqa: F401
 import app.jobs.models  # noqa: F401
@@ -26,6 +27,8 @@ import app.notifications.models  # noqa: F401
 import app.servers.models  # noqa: F401
 from app.apps.models import Application
 from app.apps.service import ENV_PURPOSE
+from app.backups.models import BackupSettings
+from app.backups.service import PURPOSE as BACKUP_PURPOSE
 from app.core.security import encrypt_secret, reencrypt_secret
 from app.databases.models import DatabaseCredential, DatabaseInstance, DatabaseQuery
 from app.databases.service import PURPOSE as DB_PURPOSE
@@ -68,6 +71,14 @@ def rotate(db: Session) -> dict[str, int]:
         counts["database"] += 1
     for query in db.scalars(select(DatabaseQuery)):
         query.sql = reencrypt_secret(query.sql, DB_PURPOSE)
+        counts["database"] += 1
+    for row in db.scalars(select(BackupSettings)):
+        row.encryption_key = reencrypt_secret(row.encryption_key, BACKUP_PURPOSE)
+        for field in ("access_key", "secret_key"):
+            if getattr(row, field):
+                setattr(
+                    row, field, reencrypt_secret(getattr(row, field), BACKUP_PURPOSE)
+                )
         counts["database"] += 1
     for job in db.scalars(select(Job).where(Job.output.is_not(None))):
         try:

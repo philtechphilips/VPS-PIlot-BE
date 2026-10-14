@@ -24,6 +24,9 @@ def _tick() -> None:
         from app.domains import service as domains
 
         domains.refresh_due(db)
+        from app.backups import service as backups
+
+        backups.run_due(db)
         counts = service.evaluate(db)
         if counts["fired"] or counts["resolved"]:
             logger.info(

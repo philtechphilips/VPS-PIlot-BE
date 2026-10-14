@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.apps.router import router as apps_router
 from app.audit.router import router as audit_router
 from app.auth.router import router as auth_router
+from app.backups.router import router as backups_router
 from app.core.config import settings
 from app.databases.router import router as databases_router
 from app.domains.router import router as domains_router
@@ -60,6 +61,7 @@ app.include_router(monitoring_router)
 app.include_router(databases_router)
 app.include_router(logs_router)
 app.include_router(domains_router)
+app.include_router(backups_router)
 
 
 @app.get("/")

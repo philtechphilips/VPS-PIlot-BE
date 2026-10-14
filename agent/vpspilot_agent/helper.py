@@ -26,7 +26,7 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
-from vpspilot_agent import databases, deploy, logs, proxy
+from vpspilot_agent import backups, databases, deploy, logs, proxy
 from vpspilot_agent.errors import Rejected
 
 log = logging.getLogger("vpspilot_helper")
@@ -135,10 +135,16 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     **databases.OPERATIONS,
     **logs.OPERATIONS,
     **proxy.OPERATIONS,
+    **backups.OPERATIONS,
 }
 
 # Long operations that report progress as they go.
-STREAMING_OPS = {**deploy.STREAMING, **databases.STREAMING, **proxy.STREAMING}
+STREAMING_OPS = {
+    **deploy.STREAMING,
+    **databases.STREAMING,
+    **proxy.STREAMING,
+    **backups.STREAMING,
+}
 
 
 def _no_events(level: str, message: str) -> None:

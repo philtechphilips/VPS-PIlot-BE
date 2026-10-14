@@ -36,9 +36,21 @@ SUPPORTED = {
     "logs.read",
     "proxy.apply",
     "proxy.status",
+    "backup.create",
+    "backup.restore",
+    "backup.delete",
+    "backup.storage_test",
 }
 # Long operations that stream progress from the helper.
-STREAMING = {"app.deploy", "app.remove", "db.create", "db.remove", "proxy.apply"}
+STREAMING = {
+    "app.deploy",
+    "app.remove",
+    "db.create",
+    "db.remove",
+    "proxy.apply",
+    "backup.create",
+    "backup.restore",
+}
 # Read-only, frequent: no "Running ..." progress event.
 QUIET = {"app.logs", "logs.read", "db.query", "db.explore", "db.redis", "proxy.status"}
 STREAM_IDLE_TIMEOUT = 30 * 60

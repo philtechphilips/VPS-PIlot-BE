@@ -54,6 +54,10 @@ KINDS: dict[str, Kind] = {
     ),
     # threshold = days of validity left (Let's Encrypt domains only)
     "tls_expiring": Kind("Certificate expiring", "domain", threshold=14, duration=0),
+    # threshold = hours since the last good backup (databases with a schedule)
+    "backup_stale": Kind(
+        "Backups stale or failing", "database", threshold=36, duration=0
+    ),
 }
 
 
@@ -198,6 +202,58 @@ def _check_metric(db: Session, rule: AlertRule, server: Server, now: datetime) -
     return Check(None, round(avg, 1), detail)
 
 
+def _scheduled_databases(db: Session) -> list[tuple[str, str, Any]]:
+    from app.backups.models import BackupPolicy
+    from app.databases.models import DatabaseInstance
+
+    out = []
+    for policy in db.scalars(
+        select(BackupPolicy).where(BackupPolicy.enabled.is_(True))
+    ):
+        instance = db.get(DatabaseInstance, policy.instance_id)
+        if instance is not None:
+            out.append((instance.id, instance.name, policy))
+    return out
+
+
+def _check_backups(db: Session, rule: AlertRule, policy, now: datetime) -> Check:
+    from app.backups.models import BackupRun
+
+    latest = db.scalar(
+        select(BackupRun)
+        .where(
+            BackupRun.instance_id == policy.instance_id,
+            BackupRun.status.in_(("succeeded", "failed")),
+        )
+        .order_by(BackupRun.created_at.desc())
+        .limit(1)
+    )
+    good = db.scalar(
+        select(BackupRun.finished_at)
+        .where(
+            BackupRun.instance_id == policy.instance_id, BackupRun.status == "succeeded"
+        )
+        .order_by(BackupRun.created_at.desc())
+        .limit(1)
+    )
+    if latest is not None and latest.status == "failed":
+        return Check(
+            True, None, f"The last backup failed: {latest.error or 'unknown error'}"
+        )
+    if good is None:
+        age = (now - _aware(policy.created_at)).total_seconds() / 3600
+        if age > rule.threshold:
+            return Check(
+                True,
+                None,
+                f"No successful backup yet ({int(age)} h since the schedule started)",
+            )
+        return Check(None)
+    hours = (now - _aware(good)).total_seconds() / 3600
+    detail = f"Last good backup {int(hours)} h ago (limit {rule.threshold:.0f} h)"
+    return Check(hours > rule.threshold, round(hours, 1), detail)
+
+
 def _check_certificate(rule: AlertRule, domain, now: datetime) -> Check:
     if domain.cert_expires_at is None:
         return Check(None)
@@ -269,6 +325,8 @@ def evaluate(db: Session, now: datetime | None = None) -> dict[str, int]:
         open_by_target = {a.target_id: a for a in _open_alerts(db, rule.id)}
         if spec.target == "domain":
             targets = [(d.id, d.hostname, d) for d in certs]
+        elif spec.target == "database":
+            targets = _scheduled_databases(db)
         elif spec.target == "server":
             targets = [
                 (s.id, s.name, s)
@@ -293,6 +351,8 @@ def evaluate(db: Session, now: datetime | None = None) -> dict[str, int]:
                 check = _check_offline(rule, target, now)
             elif rule.kind == "tls_expiring":
                 check = _check_certificate(rule, target, now)
+            elif rule.kind == "backup_stale":
+                check = _check_backups(db, rule, target, now)
             elif spec.metric:
                 check = _check_metric(db, rule, target, now)
             else:

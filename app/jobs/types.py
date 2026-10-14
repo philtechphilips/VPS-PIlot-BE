@@ -294,7 +294,62 @@ class ProxyStatusPayload(Strict):
     hosts: Annotated[list[ProxyHost], Field(max_length=200)]
 
 
+class BackupStorage(Strict):
+    endpoint: Annotated[
+        str, StringConstraints(pattern=r"^https?://[A-Za-z0-9.-]+(:\d{1,5})?$")
+    ]
+    region: Annotated[str, StringConstraints(pattern=r"^[a-z0-9-]{1,40}$")]
+    bucket: Annotated[
+        str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
+    ]
+    prefix: Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9._/-]{0,200}$")] = ""
+
+
+BackupPath = Annotated[str, StringConstraints(pattern=r"^/[A-Za-z0-9._/-]{1,400}$")]
+RemoteKey = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9._/-]{1,500}$")]
+
+
+class BackupCreatePayload(DbJob):
+    target: DbTarget
+    backup_id: HexId
+    database: DbIdent | None = None
+    keep_local: bool = True
+    storage: BackupStorage | None = None
+
+
+class BackupRestorePayload(DbJob):
+    target: DbTarget
+    backup_id: HexId
+    database: DbIdent | None = None
+    mode: Literal["replace", "new", "verify"]
+    into: DbIdent | None = None
+    path: BackupPath | None = None
+    remote_key: RemoteKey | None = None
+    sha256: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")] | None = None
+    storage: BackupStorage | None = None
+
+
+class BackupDeleteItem(Strict):
+    path: BackupPath | None = None
+    remote_key: RemoteKey | None = None
+
+
+class BackupDeletePayload(Strict):
+    items: Annotated[list[BackupDeleteItem], Field(max_length=500)]
+    storage: BackupStorage | None = None
+    has_secrets: bool = True
+
+
+class BackupStorageTestPayload(Strict):
+    storage: BackupStorage
+    has_secrets: bool = True
+
+
 JOB_TYPES: dict[str, type[Strict]] = {
+    "backup.create": BackupCreatePayload,
+    "backup.restore": BackupRestorePayload,
+    "backup.delete": BackupDeletePayload,
+    "backup.storage_test": BackupStorageTestPayload,
     "proxy.apply": ProxyApplyPayload,
     "proxy.status": ProxyStatusPayload,
     "logs.read": LogsReadPayload,

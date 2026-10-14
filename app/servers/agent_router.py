@@ -15,6 +15,7 @@ from sqlalchemy import select
 from app.apps import service as apps
 from app.apps.models import Application
 from app.audit import service as audit
+from app.backups import service as backups
 from app.core.config import settings
 from app.core.database import DbSession
 from app.databases import service as databases
@@ -152,6 +153,8 @@ def job_secrets(job_id: str, agent: Agent, db: DbSession):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No secrets for this job")
     if job.type.startswith("db."):
         return {"secrets": databases.job_secrets(db, job)}
+    if job.type.startswith("backup."):
+        return {"secrets": backups.job_secrets(db, job)}
     if job.type != "app.deploy":
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No secrets for this job")
     app = db.scalar(select(Application).where(Application.name == job.payload["app"]))

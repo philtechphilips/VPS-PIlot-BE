@@ -22,7 +22,12 @@ def job_output(job: Job) -> str | None:
 QUEUE_TTL = timedelta(minutes=10)  # unclaimed jobs expire
 RUN_TIMEOUT = timedelta(minutes=5)  # claimed jobs must finish in time
 # Builds take longer than service actions.
-RUN_TIMEOUTS = {"app.deploy": timedelta(minutes=25), "db.create": timedelta(minutes=15)}
+RUN_TIMEOUTS = {
+    "app.deploy": timedelta(minutes=25),
+    "db.create": timedelta(minutes=15),
+    "backup.create": timedelta(hours=3),
+    "backup.restore": timedelta(hours=3),
+}
 LONGEST_TIMEOUT = max([RUN_TIMEOUT, *RUN_TIMEOUTS.values()])
 MAX_OUTPUT = 64 * 1024
 MAX_EVENTS_PER_JOB = 500
