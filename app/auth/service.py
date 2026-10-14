@@ -542,3 +542,21 @@ def reset_password(db: Session, token: str, new_password: str) -> bool:
     db.query(User).filter(User.id == user_id).update({"locked_until": None})
     db.commit()
     return True
+
+
+def change_password(
+    db: Session, user: User, current: str, new: str, keep_session_id: str
+) -> bool:
+    """Verify the current password, set the new one and sign out every
+    other session (this one stays)."""
+    valid, _ = verify_password(current, user.password)
+    if not valid:
+        return False
+    user.password = hash_password(new)
+    db.query(AuthSession).filter(
+        AuthSession.user_id == user.id,
+        AuthSession.revoked_at.is_(None),
+        AuthSession.id != keep_session_id,
+    ).update({"revoked_at": _now()}, synchronize_session=False)
+    db.commit()
+    return True

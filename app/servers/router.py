@@ -1,12 +1,14 @@
+from datetime import UTC, datetime
 from typing import Annotated, NoReturn
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
+from sqlalchemy import select
 
 from app.audit import service as audit
 from app.auth.dependencies import AdminUser
 from app.core.database import DbSession
 from app.servers import service
-from app.servers.models import MetricSample, Server
+from app.servers.models import EnrollmentToken, MetricSample, Server
 from app.servers.schemas import (
     EnrollmentCreate,
     EnrollmentResponse,
@@ -109,8 +111,63 @@ def create_enrollment(
     return EnrollmentResponse(
         server=to_summary(server),
         token=token,
-        install_command=service.install_command(token),
+        install_command=service.install_command(token, db),
         expires_at=expires_at,
+    )
+
+
+@router.get("/enrollments")
+def list_enrollments(db: DbSession, _: AdminUser):
+    """Enrollment tokens, newest first (values are never shown again)."""
+    rows = []
+    now = datetime.now(UTC)
+    for token, server in db.execute(
+        select(EnrollmentToken, Server)
+        .join(Server, Server.id == EnrollmentToken.server_id)
+        .order_by(EnrollmentToken.created_at.desc())
+        .limit(50)
+    ):
+        expires = (
+            token.expires_at
+            if token.expires_at.tzinfo
+            else token.expires_at.replace(tzinfo=UTC)
+        )
+        state = (
+            "redeemed" if token.used_at else "expired" if expires < now else "pending"
+        )
+        rows.append(
+            {
+                "id": token.id,
+                "server_id": server.id,
+                "server_name": server.name,
+                "state": state,
+                "created_at": token.created_at,
+                "expires_at": token.expires_at,
+                "used_at": token.used_at,
+            }
+        )
+    return rows
+
+
+@router.delete("/enrollments/{token_id}", status_code=status.HTTP_204_NO_CONTENT)
+def revoke_enrollment(token_id: int, request: Request, db: DbSession, user: AdminUser):
+    token = db.get(EnrollmentToken, token_id)
+    if token is None or token.used_at is not None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No unused token with that id")
+    server = db.get(Server, token.server_id)
+    db.delete(token)
+    db.commit()
+    actor, label = audit.user_actor(user)
+    audit.record(
+        db,
+        action="server.enrollment.revoke",
+        result="success",
+        actor=actor,
+        actor_label=label,
+        target_type="server",
+        target_id=server.id if server else None,
+        target_label=server.name if server else None,
+        request=request,
     )
 
 
@@ -145,7 +202,7 @@ def reissue_enrollment(
     return EnrollmentResponse(
         server=to_summary(server),
         token=token,
-        install_command=service.install_command(token),
+        install_command=service.install_command(token, db),
         expires_at=expires_at,
     )
 

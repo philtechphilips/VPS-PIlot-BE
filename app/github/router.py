@@ -50,7 +50,7 @@ def _status(db, app: GitHubApp | None) -> dict[str, Any]:
     if app is None:
         return {
             "connected": False,
-            "webhooks_available": service.settings.webhook_base_url is not None,
+            "webhooks_available": service._webhook_base(db) is not None,
             "app": None,
             "installations": [],
         }

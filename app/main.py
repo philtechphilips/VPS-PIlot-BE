@@ -17,6 +17,7 @@ from app.logs.router import router as logs_router
 from app.monitoring import worker as monitoring_worker
 from app.monitoring.router import router as monitoring_router
 from app.notifications.router import router as notifications_router
+from app.platform.router import router as platform_router
 from app.servers.agent_router import router as agent_router
 from app.servers.router import router as servers_router
 from app.users.router import router as users_router
@@ -62,6 +63,7 @@ app.include_router(databases_router)
 app.include_router(logs_router)
 app.include_router(domains_router)
 app.include_router(backups_router)
+app.include_router(platform_router)
 
 
 @app.get("/")

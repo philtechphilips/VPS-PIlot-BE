@@ -26,6 +26,7 @@ from app.jobs.schemas import (
     JobCompleteRequest,
     JobEventsRequest,
 )
+from app.platform import service as platform
 from app.servers import service
 from app.servers.models import Server
 from app.servers.schemas import (
@@ -208,10 +209,10 @@ INSTALL_SCRIPT = (Path(__file__).parent / "install.sh").read_text()
 
 
 @router.get("/install.sh", response_class=PlainTextResponse)
-def install_script():
+def install_script(db: DbSession):
     """The one-line installer referenced by enrollment commands."""
     return PlainTextResponse(
-        INSTALL_SCRIPT.replace("__API_URL__", settings.agent_api_url.rstrip("/")),
+        INSTALL_SCRIPT.replace("__API_URL__", platform.agent_url(db)),
         media_type="text/x-shellscript",
     )
 

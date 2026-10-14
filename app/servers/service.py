@@ -137,8 +137,12 @@ def remove(db: Session, server: Server) -> None:
     db.commit()
 
 
-def install_command(token: str) -> str:
-    base = settings.agent_api_url.rstrip("/")
+def install_command(token: str, db: Session | None = None) -> str:
+    from app.platform import service as platform
+
+    base = (
+        platform.agent_url(db) if db is not None else settings.agent_api_url.rstrip("/")
+    )
     return f"curl -fsSL {base}/agent/install.sh | sudo bash -s -- --token {token}"
 
 

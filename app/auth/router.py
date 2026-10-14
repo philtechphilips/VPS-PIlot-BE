@@ -11,6 +11,7 @@ from app.auth.models import TwoFactorChallenge
 from app.auth.schemas import (
     AuthResponse,
     ChallengeResponse,
+    ChangePasswordRequest,
     CodeRequest,
     ForgotPasswordRequest,
     LoginRequest,
@@ -394,3 +395,45 @@ def reset_password(body: ResetPasswordRequest, request: Request, db: DbSession):
         )
     _audit(db, request, "auth.password_reset", "success")
     return MessageResponse(message="Password has been reset")
+
+
+@router.post("/password", response_model=MessageResponse)
+def change_password(
+    body: ChangePasswordRequest,
+    request: Request,
+    current_user: CurrentUser,
+    session_id: CurrentSessionId,
+    db: DbSession,
+):
+    """Change the password; every other session is signed out."""
+    actor, label = audit.user_actor(current_user)
+    if not service.change_password(
+        db, current_user, body.current_password, body.new_password, session_id
+    ):
+        audit.record(
+            db,
+            action="auth.password_change",
+            result="failure",
+            actor=actor,
+            actor_label=label,
+            target_type="user",
+            target_id=str(current_user.id),
+            target_label=current_user.email,
+            detail="wrong current password",
+            request=request,
+        )
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "The current password isn't right"
+        )
+    audit.record(
+        db,
+        action="auth.password_change",
+        result="success",
+        actor=actor,
+        actor_label=label,
+        target_type="user",
+        target_id=str(current_user.id),
+        target_label=current_user.email,
+        request=request,
+    )
+    return MessageResponse(message="Password changed. Other sessions were signed out.")

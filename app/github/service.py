@@ -97,7 +97,9 @@ def manifest(db: Session, user_id: str, organization: str | None) -> dict[str, A
         raise GitHubIntegrationError(422, "That isn't a valid organization name")
     front = settings.frontend_url.rstrip("/")
     page = f"{front}/dashboard/settings/github"
-    webhook = settings.webhook_base_url
+    from app.platform import service as platform
+
+    webhook = platform.webhook_base(db)
     body: dict[str, Any] = {
         # App names are unique across GitHub, so add a short random suffix.
         "name": f"VPSPilot {secrets.token_hex(3)}",
@@ -152,8 +154,8 @@ def complete_manifest(
         private_key=encrypt_secret(data["pem"], PURPOSE),
         webhook_secret=encrypt_secret(hook, PURPOSE) if hook else None,
         webhook_url=(
-            f"{settings.webhook_base_url}/api/v1/github/webhook"
-            if hook and settings.webhook_base_url
+            f"{_webhook_base(db)}/api/v1/github/webhook"
+            if hook and _webhook_base(db)
             else None
         ),
         created_by=actor_label[:64],
@@ -162,6 +164,12 @@ def complete_manifest(
     db.commit()
     db.refresh(app)
     return app
+
+
+def _webhook_base(db: Session) -> str | None:
+    from app.platform import service as platform
+
+    return platform.webhook_base(db)
 
 
 def install_url(app: GitHubApp) -> str:
