@@ -568,7 +568,10 @@ def _build(spec: dict[str, Any], workdir: str, sha: str, emit: Emit) -> tuple[st
     # settings changed but the commit didn't.
     image = f"{IMAGE_PREFIX}/{spec['app']}:{sha[:12]}-{spec['deployment_id'][:6]}"
     emit("step", f"Building {image}")
-    cmd = ["docker", "build", "-t", image, "-f", dockerfile]
+    before = _dangling()
+    # --force-rm: the classic builder otherwise keeps the failed step's
+    # container, which pins its layers.
+    cmd = ["docker", "build", "--force-rm", "-t", image, "-f", dockerfile]
     for key in build_args:
         cmd += ["--build-arg", key]
     code, tail = _stream(
@@ -582,8 +585,29 @@ def _build(spec: dict[str, Any], workdir: str, sha: str, emit: Emit) -> tuple[st
         },
     )
     if code != 0:
+        # The classic builder keeps every finished step as an image; a failed
+        # build would leave them behind on every push.
+        for layer in _dangling() - before:
+            _run(["docker", "image", "rm", layer], timeout=60)
         raise Failed("The image build failed")
     return image, method
+
+
+def _dangling() -> set[str]:
+    code, out = _run(
+        ["docker", "images", "-q", "--no-trunc", "--filter", "dangling=true"],
+        timeout=30,
+    )
+    return set(out.split()) if code == 0 else set()
+
+
+def _discard_image(image: str, live: str) -> None:
+    """Remove a build that never went live (and its layers), so failed
+    deployments don't fill the disk."""
+    code, out = _run(["docker", "inspect", "-f", "{{.Config.Image}}", live], timeout=15)
+    if code == 0 and out.strip() == image:
+        return
+    _run(["docker", "image", "rm", image], timeout=120)
 
 
 def _pull(image: str, pull: bool, emit: Emit) -> None:
@@ -628,6 +652,7 @@ def deploy(args: dict[str, Any], emit: Emit) -> dict[str, Any]:
     os.chmod(APPS_DIR, 0o700)
     env_file = None
     sha = message = method = None
+    built = None  # an image this deployment built (discarded if it fails)
     try:
         if shutil.which("docker") is None:
             raise Failed("Docker isn't installed on this server")
@@ -640,6 +665,7 @@ def deploy(args: dict[str, Any], emit: Emit) -> dict[str, Any]:
                 raise Failed("git isn't installed on this server")
             sha, message = _fetch(spec, workdir, say)
             image, method = _build(spec, workdir, sha, say)
+            built = image
         else:
             method = "Container image"
             image = source["image"]
@@ -728,6 +754,8 @@ def deploy(args: dict[str, Any], emit: Emit) -> dict[str, Any]:
         }
     except Failed as error:
         say("error", str(error))
+        if built:
+            _discard_image(built, live)
         return {
             "exit_code": 1,
             "output": "",

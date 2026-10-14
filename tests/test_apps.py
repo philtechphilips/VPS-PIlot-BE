@@ -460,3 +460,19 @@ def test_deployments_are_paginated(client, admin_headers):
     ).json()
     ids = [d["id"] for d in first + second + third]
     assert len(ids) == 5 and len(set(ids)) == 5
+
+
+def test_failed_builds_are_discarded_but_never_the_live_one(monkeypatch):
+    calls = []
+
+    def fake_run(cmd, timeout=60, **kwargs):
+        calls.append(cmd)
+        if cmd[:2] == ["docker", "inspect"]:
+            return 0, "vpspilot/shop:live\n"
+        return 0, ""
+
+    monkeypatch.setattr(deploy, "_run", fake_run)
+    deploy._discard_image("vpspilot/shop:live", "vp-shop")
+    assert ["docker", "image", "rm", "vpspilot/shop:live"] not in calls
+    deploy._discard_image("vpspilot/shop:new", "vp-shop")
+    assert ["docker", "image", "rm", "vpspilot/shop:new"] in calls
