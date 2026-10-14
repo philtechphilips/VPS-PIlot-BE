@@ -235,6 +235,22 @@ def _runtimes() -> dict[str, str | None]:
     return found
 
 
+def listening_ports() -> list[int]:
+    """TCP ports something listens on, so new apps don't collide with them."""
+    ports: set[int] = set()
+    for path in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            with open(path) as handle:
+                next(handle, None)  # header
+                for line in handle:
+                    fields = line.split()
+                    if len(fields) > 3 and fields[3] == "0A":  # LISTEN
+                        ports.add(int(fields[1].rsplit(":", 1)[1], 16))
+        except (OSError, ValueError):
+            continue
+    return sorted(ports)[:2000]
+
+
 def inventory() -> dict[str, Any]:
     docker_access, containers = _containers()
     return {
@@ -242,4 +258,5 @@ def inventory() -> dict[str, Any]:
         "containers": containers,
         "runtimes": _runtimes(),
         "docker_access": docker_access,
+        "listening_ports": listening_ports(),
     }

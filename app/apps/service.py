@@ -106,12 +106,48 @@ def get_app(db: Session, app_id: str) -> Application | None:
     return db.get(Application, app_id)
 
 
-def _next_host_port(db: Session, server_id: str) -> int:
-    used = set(
-        db.scalars(
-            select(Application.host_port).where(Application.server_id == server_id)
+PUBLISHED_RE = re.compile(r":(\d+)->")
+
+
+def _ports_in_use(server: Server) -> dict[int, str]:
+    """Ports the agent last saw in use on the server -> what holds them."""
+    inventory = server.inventory or {}
+    used: dict[int, str] = {
+        int(p): "another program" for p in inventory.get("listening_ports") or []
+    }
+    for container in inventory.get("containers") or []:
+        for port in PUBLISHED_RE.findall(str(container.get("ports") or "")):
+            used[int(port)] = f"the container {container.get('name')}"
+    return used
+
+
+def _port_conflict(
+    db: Session, server: Server, port: int, app: Application | None = None
+) -> str | None:
+    other = db.scalar(
+        select(Application).where(
+            Application.server_id == server.id,
+            Application.host_port == port,
+            *([Application.id != app.id] if app else []),
         )
     )
+    if other:
+        return f"Port {port} is already used by {other.name}"
+    if app and port == app.host_port:
+        return None  # its own running container holds it
+    holder = _ports_in_use(server).get(port)
+    if holder:
+        return f"Port {port} on {server.name} is already used by {holder}"
+    return None
+
+
+def _next_host_port(db: Session, server: Server) -> int:
+    used = set(
+        db.scalars(
+            select(Application.host_port).where(Application.server_id == server.id)
+        )
+    )
+    used |= set(_ports_in_use(server))
     port = FIRST_HOST_PORT
     while port in used:
         port += 1
@@ -128,14 +164,10 @@ def create_app(db: Session, server: Server, data: dict[str, Any]) -> Application
         raise AppError(409, f"An application named {name} already exists")
     if server.enrolled_at is None or server.revoked_at is not None:
         raise AppError(409, "Pick a server with an active agent")
-    host_port = data.get("host_port") or _next_host_port(db, server.id)
-    clash = db.scalar(
-        select(Application).where(
-            Application.server_id == server.id, Application.host_port == host_port
-        )
-    )
-    if clash:
-        raise AppError(409, f"Port {host_port} is already used by {clash.name}")
+    host_port = data.get("host_port") or _next_host_port(db, server)
+    conflict = _port_conflict(db, server, host_port)
+    if conflict:
+        raise AppError(409, conflict)
 
     source = data["source"]
     linked: dict[str, Any] | None = None
@@ -183,6 +215,12 @@ def create_app(db: Session, server: Server, data: dict[str, Any]) -> Application
 
 def update_settings(db: Session, app: Application, data: dict[str, Any]) -> Application:
     """Change how the next deployment runs. Nothing restarts until then."""
+    if data.get("host_port") and data["host_port"] != app.host_port:
+        server = db.get(Server, app.server_id)
+        conflict = server and _port_conflict(db, server, data["host_port"], app)
+        if conflict:
+            raise AppError(409, conflict)
+        app.host_port = data["host_port"]
     for field in (
         "branch",
         "image",

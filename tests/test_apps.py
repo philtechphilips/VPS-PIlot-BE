@@ -350,3 +350,93 @@ def test_executor_streams_deploy_progress_and_reports_result():
     assert "step 4" in body["output"]
     # The secret never travels back to the control plane.
     assert "s3cret-value" not in json.dumps(client.calls[1:])
+
+
+# ---------------------------------------------------------------------------
+# Public ports
+# ---------------------------------------------------------------------------
+
+
+def report_ports(client, agent, listening, containers=()):
+    response = client.post(
+        "/agent/v1/inventory",
+        json={"listening_ports": listening, "containers": list(containers)},
+        headers=agent,
+    )
+    assert response.status_code < 300, response.text
+
+
+def test_new_apps_skip_ports_already_in_use(client, admin_headers):
+    server_id, agent = enrolled_agent(client, admin_headers)
+    report_ports(
+        client,
+        agent,
+        [22, 20000],
+        [
+            {
+                "id": "abc",
+                "name": "legacy",
+                "image": "x",
+                "state": "running",
+                "status": "Up",
+                "ports": "0.0.0.0:20001->80/tcp",
+            }
+        ],
+    )
+    first = client.post(APPS, json=git_app(server_id), headers=admin_headers).json()
+    assert first["host_port"] == 20002
+    second = client.post(
+        APPS, json=git_app(server_id, name="blog"), headers=admin_headers
+    ).json()
+    assert second["host_port"] == 20003
+    taken = client.post(
+        APPS,
+        json=git_app(server_id, name="api", host_port=20001),
+        headers=admin_headers,
+    )
+    assert taken.status_code == 409
+    assert "the container legacy" in taken.json()["detail"]
+
+
+def test_public_port_can_be_changed(client, admin_headers):
+    server_id, agent = enrolled_agent(client, admin_headers)
+    report_ports(client, agent, [8080])
+    app = client.post(APPS, json=git_app(server_id), headers=admin_headers).json()
+    other = client.post(
+        APPS, json=git_app(server_id, name="blog"), headers=admin_headers
+    ).json()
+    url = f"{APPS}/{app['id']}"
+    assert (
+        client.patch(url, json={"host_port": 8080}, headers=admin_headers).status_code
+        == 409
+    )
+    assert (
+        client.patch(
+            url, json={"host_port": other["host_port"]}, headers=admin_headers
+        ).status_code
+        == 409
+    )
+    assert (
+        client.patch(url, json={"host_port": 80}, headers=admin_headers).status_code
+        == 422
+    )
+    moved = client.patch(url, json={"host_port": 24000}, headers=admin_headers).json()
+    assert moved["host_port"] == 24000
+    job = claim(client, agent)
+    assert job["payload"]["host_port"] in (app["host_port"], 24000)
+
+
+def test_docker_errors_are_readable():
+    message = deploy._docker_error(
+        "docker: Error response from daemon: failed to set up container networking: driver failed "
+        "programming external connectivity on endpoint vp-x (4136): Bind for 0.0.0.0:20000 failed: "
+        "port is already allocated\n\nRun 'docker run --help' for more information\n"
+    )
+    assert (
+        message
+        == "Port 20000 is already in use on this server. Pick another public port in the app's settings."
+    )
+    assert (
+        deploy._docker_error("docker: Error response from daemon: No such image: x.\n")
+        == "No such image: x."
+    )

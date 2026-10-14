@@ -68,6 +68,7 @@ class AppUpdate(BaseModel):
     build_command: Command | None = None
     start_command: Command | None = None
     container_port: Port | None = None
+    host_port: HostPort | None = None
     health_path: HealthPath | None = None
     health_timeout_seconds: Annotated[int, Field(ge=5, le=600)] | None = None
     cpu_limit: Cpus | None = None

@@ -105,6 +105,9 @@ class InventoryRequest(BaseModel):
     containers: Annotated[list[ContainerIn], Field(max_length=200)] = []
     runtimes: Annotated[dict[Short, Short | None], Field(max_length=32)] = {}
     docker_access: bool = False
+    listening_ports: Annotated[
+        list[Annotated[int, Field(ge=1, le=65535)]], Field(max_length=2000)
+    ] = []
 
 
 # ---------------------------------------------------------------------------

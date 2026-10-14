@@ -16,6 +16,7 @@ import base64
 import os
 import re
 import shutil
+import socket
 import subprocess
 import threading
 import time
@@ -309,6 +310,51 @@ def _run_args(
     return [*cmd, image]
 
 
+def _docker_error(out: str) -> str:
+    """The useful sentence from a `docker run` failure."""
+    lines = [
+        line.strip()
+        for line in out.splitlines()
+        if line.strip() and not line.startswith("Run 'docker")
+    ]
+    message = lines[-1] if lines else "docker run failed"
+    message = re.sub(r"^docker: Error response from daemon:\s*", "", message)
+    port = re.search(r"Bind for [^ ]*:(\d+) failed: port is already allocated", message)
+    if port:
+        return (
+            f"Port {port.group(1)} is already in use on this server. "
+            "Pick another public port in the app's settings."
+        )
+    return message[:400]
+
+
+def _check_port(port: int, ours: set[str], emit: Emit) -> None:
+    """Fail before building if something else holds the app's public port."""
+    code, out = _run(
+        ["docker", "ps", "--filter", f"publish={port}", "--format", "{{.Names}}"],
+        timeout=15,
+    )
+    holders = [n for n in out.split() if n not in ours] if code == 0 else []
+    if holders:
+        raise Failed(
+            f"Port {port} is already used by the container {holders[0]}. "
+            "Pick another public port in the app's settings, or stop that container."
+        )
+    if code == 0 and any(n in ours for n in out.split()):
+        return  # our current release holds it; the swap frees it
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.bind(("0.0.0.0", port))
+    except OSError:
+        raise Failed(
+            f"Port {port} is already in use on this server by another program. "
+            "Pick another public port in the app's settings."
+        ) from None
+    finally:
+        probe.close()
+    emit("info", f"Port {port} is free")
+
+
 def _loopback_port(name: str, container_port: int) -> int | None:
     code, out = _run(["docker", "port", name, f"{container_port}/tcp"], timeout=15)
     if code != 0:
@@ -542,6 +588,7 @@ def deploy(args: dict[str, Any], emit: Emit) -> dict[str, Any]:
     try:
         if shutil.which("docker") is None:
             raise Failed("Docker isn't installed on this server")
+        _check_port(spec["host_port"], {live, previous, candidate}, say)
         source = spec["source"]
         if source["type"] == "git":
             if shutil.which("git") is None:
@@ -561,7 +608,7 @@ def deploy(args: dict[str, Any], emit: Emit) -> dict[str, Any]:
         publish = f"127.0.0.1::{spec['container_port']}"
         code, out = _run(_run_args(spec, candidate, image, env_file, publish))
         if code != 0:
-            raise Failed(f"Couldn't start the container: {redact(out)[-300:]}")
+            raise Failed(f"Couldn't start the container: {_docker_error(redact(out))}")
         port = _loopback_port(candidate, spec["container_port"])
         if port is None:
             _container_logs(candidate, say, redact)
@@ -600,16 +647,25 @@ def deploy(args: dict[str, Any], emit: Emit) -> dict[str, Any]:
             say,
         )
         if not ok:
-            if code != 0:
-                say("error", redact(out)[-300:])
-            _container_logs(live, say, redact)
+            reason = (
+                _docker_error(redact(out))
+                if code != 0
+                else "The new version failed its health check after release."
+            )
+            if code == 0:
+                _container_logs(live, say, redact)
             _remove(live)
             if had_live:
                 say("warn", "Restoring the previous version")
                 _run(["docker", "rename", previous, live])
                 _run(["docker", "start", live])
             raise Failed(
-                "The new version failed after release; the previous one was restored"
+                f"{reason} "
+                + (
+                    "The previous version was restored."
+                    if had_live
+                    else "Nothing was released."
+                )
             )
         if had_live:
             _remove(previous)
