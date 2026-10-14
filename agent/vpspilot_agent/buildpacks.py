@@ -243,6 +243,13 @@ def _node(
             if repo.exists("yarn.lock")
             else "yarn install",
         }[manager]
+        if manager == "npm":
+            install += " --include=dev"  # also overrides omit=dev in .npmrc
+
+    # Builds need devDependencies (TypeScript, bundlers, husky for the
+    # "prepare" script) even when the app's NODE_ENV is production, which
+    # would make the package manager skip them. Git hooks are pointless here.
+    install = f"HUSKY=0 NODE_ENV=development {install}"
 
     build_cmd = build or (f"{run} build" if "build" in scripts else None)
 

@@ -48,7 +48,10 @@ def test_next_with_pnpm_and_node_version(tmp_path):
     assert plan.stack == "Next.js · pnpm · Node 20"
     assert plan.dockerfile.startswith("FROM node:20-bookworm-slim")
     assert "RUN corepack enable" in plan.dockerfile
-    assert runs(plan.dockerfile) == ["pnpm install --frozen-lockfile", "pnpm run build"]
+    assert runs(plan.dockerfile) == [
+        "HUSKY=0 NODE_ENV=development pnpm install --frozen-lockfile",
+        "pnpm run build",
+    ]
     assert cmd_of(plan.dockerfile) == "pnpm run start"
 
 
@@ -63,7 +66,9 @@ def test_express_without_scripts_uses_main(tmp_path):
     )
     plan = buildpacks.plan(root)
     assert plan.stack == "Express · npm · Node 22"
-    assert runs(plan.dockerfile) == ["npm ci"]
+    assert runs(plan.dockerfile) == [
+        "HUSKY=0 NODE_ENV=development npm ci --include=dev"
+    ]
     assert cmd_of(plan.dockerfile) == "node src/server.js"
 
 
@@ -286,3 +291,18 @@ def test_secret_env_values_are_not_build_args():
     assert spec["start_command"] == "node server.js" and spec["build_command"] is None
     with pytest.raises(deploy.Rejected):
         deploy.validate({**spec, "start_command": "a\nb"})
+
+
+def test_node_builds_get_dev_dependencies_even_in_production(tmp_path):
+    """NODE_ENV=production in the app's variables used to make npm skip
+    devDependencies, so a "prepare": "husky" script failed to install."""
+    (tmp_path / "package.json").write_text(
+        pkg(
+            scripts={"prepare": "husky", "start": "node index.js"},
+            devDependencies={"husky": "9"},
+        )
+    )
+    (tmp_path / "package-lock.json").write_text("{}")
+    plan = buildpacks.plan(str(tmp_path), build_args=["NODE_ENV"])
+    assert plan.install == "HUSKY=0 NODE_ENV=development npm ci --include=dev"
+    assert "ARG NODE_ENV" in plan.dockerfile
