@@ -21,6 +21,7 @@ dependencies = [
 dev = [
     "httpx2>=2.13.1",
     "poethepoet>=0.48.0",
+    "psutil>=7.2.2",
     "pytest>=9.1.1",
     "ruff>=0.17.0",
 ]
@@ -51,7 +52,7 @@ args = [{ name = "message", positional = true, required = true, help = "Short de
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["."]
+pythonpath = [".", "agent"]
 
 [tool.ruff]
 line-length = 88
@@ -66,6 +67,8 @@ ignore = ["UP047"]
 [tool.ruff.lint.per-file-ignores]
 # Inline-styled email HTML can't be wrapped sensibly.
 "app/auth/emails.py" = ["E501"]
+# The agent must run on the stock Python of Ubuntu 22.04 (3.10).
+"agent/**" = ["UP017"]
 
 [tool.ruff.lint.flake8-bugbear]
 # FastAPI's Depends()/Query() in defaults is idiomatic
