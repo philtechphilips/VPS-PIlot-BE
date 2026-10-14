@@ -71,7 +71,7 @@ def get_job(job_id: str, db: DbSession, _: AdminUser):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Job not found")
     return JobDetail(
         **JobOut.model_validate(job).model_dump(),
-        output=job.output,
+        output=service.job_output(job),
         events=[JobEventOut.model_validate(e) for e in service.events(db, job.id)],
     )
 

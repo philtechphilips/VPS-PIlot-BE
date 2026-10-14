@@ -234,7 +234,7 @@ def get_deployment(deployment_id: str, db: DbSession, _: AdminUser):
     return DeploymentDetail(
         **_deployment_out(db, deployment).model_dump(),
         spec=deployment.spec or {},
-        output=job.output if job else None,
+        output=jobs.job_output(job) if job else None,
         events=events,
     )
 

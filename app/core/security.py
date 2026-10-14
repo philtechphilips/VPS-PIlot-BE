@@ -10,7 +10,7 @@ from typing import Any
 from urllib.parse import quote, urlencode
 
 import jwt
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 from pwdlib import PasswordHash
 from pwdlib.hashers.argon2 import Argon2Hasher
 from pwdlib.hashers.bcrypt import BcryptHasher
@@ -140,12 +140,27 @@ def totp_uri(secret: str, account: str, issuer: str = "VPSPilot") -> str:
     return f"otpauth://totp/{label}?{urlencode({'secret': secret, 'issuer': issuer})}"
 
 
-def _fernet(purpose: str = "totp") -> Fernet:
-    # Derived from SECRET_KEY, which lives in the environment, not the
-    # database: a leaked database alone doesn't reveal stored secrets. Each
-    # purpose gets its own key so one kind of secret can't decrypt another.
-    key = hashlib.sha256(f"vpspilot:{purpose}:{settings.secret_key}".encode()).digest()
+def _derive(master: str, purpose: str) -> Fernet:
+    # Each purpose gets its own key so one kind of secret can't decrypt
+    # another. The master key lives in the environment, not the database:
+    # a leaked database alone doesn't reveal stored secrets.
+    key = hashlib.sha256(f"vpspilot:{purpose}:{master}".encode()).digest()
     return Fernet(base64.urlsafe_b64encode(key))
+
+
+def _masters() -> list[str]:
+    """Current key first, then keys that can still decrypt (rotation)."""
+    keys = [settings.encryption_key] if settings.encryption_key else []
+    keys += [
+        k.strip() for k in settings.encryption_keys_previous.split(",") if k.strip()
+    ]
+    # Installs from before ENCRYPTION_KEY encrypted with SECRET_KEY.
+    keys.append(settings.secret_key)
+    return list(dict.fromkeys(keys))
+
+
+def _fernet(purpose: str = "totp") -> MultiFernet:
+    return MultiFernet([_derive(master, purpose) for master in _masters()])
 
 
 def encrypt_secret(value: str, purpose: str = "totp") -> str:
@@ -154,6 +169,21 @@ def encrypt_secret(value: str, purpose: str = "totp") -> str:
 
 def decrypt_secret(token: str, purpose: str = "totp") -> str:
     return _fernet(purpose).decrypt(token.encode()).decode()
+
+
+def reencrypt_secret(token: str, purpose: str = "totp") -> str:
+    """Re-encrypt with the current key (no-op cost if it already is)."""
+    return _fernet(purpose).rotate(token.encode()).decode()
+
+
+def decrypt_or_plain(value: str | None, purpose: str) -> str | None:
+    """For columns that held plain text before they were encrypted."""
+    if not value:
+        return value
+    try:
+        return decrypt_secret(value, purpose)
+    except InvalidToken:
+        return value
 
 
 # ---------------------------------------------------------------------------

@@ -14,6 +14,13 @@ class Settings(BaseSettings):
     database_username: str
 
     secret_key: str
+    # Key for encrypting stored secrets (env vars, TOTP, GitHub keys, job
+    # output). Generate with `python -m app.encryption generate-key`. When
+    # empty, a key derived from SECRET_KEY is used (older installs).
+    # Old keys go in ENCRYPTION_KEYS_PREVIOUS (comma separated) during a
+    # rotation, then `python -m app.encryption rotate` re-encrypts.
+    encryption_key: str = ""
+    encryption_keys_previous: str = ""
     algorithm: str = "HS256"
     # Access tokens are short-lived; the refresh cookie keeps the session going.
     access_token_expire_minutes: int = 15

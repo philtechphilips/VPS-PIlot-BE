@@ -401,9 +401,11 @@ def test_new_apps_skip_ports_already_in_use(client, admin_headers):
 def test_public_port_can_be_changed(client, admin_headers):
     server_id, agent = enrolled_agent(client, admin_headers)
     report_ports(client, agent, [8080])
-    app = client.post(APPS, json=git_app(server_id), headers=admin_headers).json()
+    app = client.post(
+        APPS, json=git_app(server_id, deploy=False), headers=admin_headers
+    ).json()
     other = client.post(
-        APPS, json=git_app(server_id, name="blog"), headers=admin_headers
+        APPS, json=git_app(server_id, name="blog", deploy=False), headers=admin_headers
     ).json()
     url = f"{APPS}/{app['id']}"
     assert (
@@ -422,20 +424,22 @@ def test_public_port_can_be_changed(client, admin_headers):
     )
     moved = client.patch(url, json={"host_port": 24000}, headers=admin_headers).json()
     assert moved["host_port"] == 24000
-    job = claim(client, agent)
-    assert job["payload"]["host_port"] in (app["host_port"], 24000)
+    client.post(f"{url}/deployments", json={}, headers=admin_headers)
+    assert claim(client, agent)["payload"]["host_port"] == 24000
 
 
 def test_docker_errors_are_readable():
     message = deploy._docker_error(
-        "docker: Error response from daemon: failed to set up container networking: driver failed "
-        "programming external connectivity on endpoint vp-x (4136): Bind for 0.0.0.0:20000 failed: "
-        "port is already allocated\n\nRun 'docker run --help' for more information\n"
+        "docker: Error response from daemon: failed to set up container networking: "
+        "driver failed programming external connectivity on endpoint vp-x (4136): "
+        "Bind for 0.0.0.0:20000 failed: port is already allocated\n\n"
+        "Run 'docker run --help' for more information\n"
     )
-    assert (
-        message
-        == "Port 20000 is already in use on this server. Pick another public port in the app's settings."
+    expected = (
+        "Port 20000 is already in use on this server. "
+        "Pick another public port in the app's settings."
     )
+    assert message == expected
     assert (
         deploy._docker_error("docker: Error response from daemon: No such image: x.\n")
         == "No such image: x."

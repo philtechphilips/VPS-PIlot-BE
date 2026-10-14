@@ -7,10 +7,17 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.audit import service as audit
-from app.core.security import new_id
+from app.core.security import decrypt_or_plain, encrypt_secret, new_id
 from app.jobs import types
 from app.jobs.models import Job, JobEvent
 from app.servers.models import Server
+
+OUTPUT_PURPOSE = "job-output"
+
+
+def job_output(job: Job) -> str | None:
+    return decrypt_or_plain(job.output, OUTPUT_PURPOSE)
+
 
 QUEUE_TTL = timedelta(minutes=10)  # unclaimed jobs expire
 RUN_TIMEOUT = timedelta(minutes=5)  # claimed jobs must finish in time
@@ -255,7 +262,11 @@ def complete(
     job.status = "succeeded" if succeeded else "failed"
     job.finished_at = _now()
     job.exit_code = exit_code
-    job.output = output[-MAX_OUTPUT:] if output else None
+    # Output is whatever the command printed (logs can contain secrets), so
+    # it is encrypted at rest; read it back with job_output().
+    job.output = (
+        encrypt_secret(output[-MAX_OUTPUT:], OUTPUT_PURPOSE) if output else None
+    )
     job.error = (error or "")[:500] or None
     job.result = result or {}
     for hook in on_finished:
