@@ -19,6 +19,7 @@ import os
 import re
 import subprocess
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -233,10 +234,14 @@ def _client_cmd(
             *tool,
         ], None
     # External: throwaway client container; password through an env file.
-    import tempfile
 
-    fd, env_file = tempfile.mkstemp(prefix="vpb-env-")
+    workdir = dbs.tempdir()
+    docker_args, tls_env, flags = dbs.external_options(target, workdir)
+    env_file = os.path.join(workdir, "env")
+    fd = os.open(env_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as handle:
+        for key, value in tls_env.items():
+            handle.write(f"{key}={value}\n")
         if engine == "postgres":
             handle.write(f"PGPASSWORD={target['password'] or ''}\n")
         elif engine in ("mysql", "mariadb"):
@@ -253,6 +258,7 @@ def _client_cmd(
         "host",
         "--env-file",
         env_file,
+        *docker_args,
         target["image"],
     ]
     if engine == "postgres":
@@ -271,6 +277,7 @@ def _client_cmd(
         return [
             *base,
             *tool,
+            *flags,
             "-h",
             target["host"],
             "-P",
@@ -279,7 +286,15 @@ def _client_cmd(
             target["user"] or "root",
             *([database] if database else []),
         ], env_file
-    return [*base, *tool, "-h", target["host"], "-p", str(target["port"])], env_file
+    return [
+        *base,
+        *tool,
+        *flags,
+        "-h",
+        target["host"],
+        "-p",
+        str(target["port"]),
+    ], env_file
 
 
 def _dump_tool(engine: str) -> tuple[list[str], str]:
@@ -308,14 +323,18 @@ def _dump_tool(engine: str) -> tuple[list[str], str]:
 def _pipeline(
     stages: list[list[str]],
     env_for: dict[int, dict[str, str]],
-    stdin_file: str | None,
+    stdin_file: str | int | None,
     stdout_file: str | None,
     timeout: int,
 ) -> tuple[int, str]:
-    """Run commands piped together; returns (first non-zero code, stderr)."""
+    """Run commands piped together; returns (first non-zero code, stderr).
+    stdin_file may be an already-open descriptor (checked by the caller)."""
     procs = []
     errors: list[str] = []
-    previous = open(stdin_file, "rb") if stdin_file else subprocess.DEVNULL
+    if isinstance(stdin_file, int):
+        previous = os.fdopen(stdin_file, "rb")
+    else:
+        previous = open(stdin_file, "rb") if stdin_file else subprocess.DEVNULL
     out_handle = open(stdout_file, "wb") if stdout_file else None
     try:
         for i, cmd in enumerate(stages):
@@ -445,7 +464,7 @@ def create(args: dict[str, Any], emit: Emit) -> dict[str, Any]:
         return {"exit_code": 1, "output": "", "error": str(error)}
     finally:
         if env_file:
-            os.unlink(env_file)
+            dbs.cleanup(env_file)
 
 
 def _fetch(args: dict[str, Any], emit: Emit) -> tuple[str, bool]:
@@ -495,30 +514,7 @@ def restore(args: dict[str, Any], emit: Emit) -> dict[str, Any]:
         _verify_checksum(path, args.get("sha256"))
         emit("info", "Checksum verified")
         if engine == "redis":
-            # Decrypt and check the RDB header; full Redis restores replace
-            # the dataset and are done by hand for now.
-            done = subprocess.run(
-                [*OPENSSL, "-d", "-in", path],
-                capture_output=True,
-                env={**os.environ, "VPB_KEY": key},
-                timeout=600,
-            )
-            if done.returncode != 0:
-                raise Failed("Couldn't decrypt the backup (wrong key?)")
-            import gzip
-
-            header = gzip.decompress(done.stdout)[:5]
-            if header != b"REDIS":
-                raise Failed("The snapshot isn't a valid Redis RDB file")
-            if mode != "verify":
-                raise Failed(
-                    "Restoring Redis isn't automated yet; the backup itself is valid"
-                )
-            return {
-                "exit_code": 0,
-                "output": "",
-                "result": {"verified": True, "tables": 0},
-            }
+            return _restore_redis(target, path, key, mode, emit)
         destination = (
             database
             if mode == "replace"
@@ -613,7 +609,150 @@ def restore(args: dict[str, Any], emit: Emit) -> dict[str, Any]:
         if temporary and path and os.path.exists(path):
             os.unlink(path)
         if env_file:
-            os.unlink(env_file)
+            dbs.cleanup(env_file)
+
+
+REDIS_IMAGE = "redis:7-alpine"
+
+
+def _redis_ready(container: str, timeout: int = 60) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        code, out, _ = dbs._run(
+            ["docker", "exec", container, "sh", "-c",
+             'REDISCLI_AUTH="$VP_REDIS_PASSWORD" redis-cli PING'],
+            15,
+        )  # fmt: skip
+        if code == 0 and "PONG" in out:
+            return True
+        time.sleep(1)
+    return False
+
+
+def _restore_redis(
+    target: dict[str, Any], path: str, key: str, mode: str, emit: Emit
+) -> dict[str, Any]:
+    """Check the snapshot; for mode=replace, swap it into a managed
+    instance. Redis ignores dump.rdb while AOF is on, so the snapshot is
+    loaded with AOF off, AOF is switched on (Redis rewrites it from memory)
+    and the instance is started again from that."""
+
+    if mode == "new":
+        raise Failed("Redis snapshots restore into the same instance")
+    if mode == "replace" and target["mode"] != "managed":
+        raise Failed(
+            "Restore external Redis by hand: VPSPilot only replaces data of databases it runs"
+        )
+    workdir = dbs.tempdir()
+    try:
+        rdb = os.path.join(workdir, "dump.rdb")
+        code, errors = _pipeline(
+            [[*OPENSSL, "-d", "-in", path], ["gunzip", "-c"]],
+            {0: {"VPB_KEY": key}},
+            None,
+            rdb,
+            DUMP_TIMEOUT,
+        )
+        if code != 0:
+            raise Failed("Couldn't decrypt the backup (wrong key?)")
+        with open(rdb, "rb") as handle:
+            if handle.read(5) != b"REDIS":
+                raise Failed("The snapshot isn't a valid Redis RDB file")
+        emit("info", "The snapshot is a valid Redis RDB file")
+        if mode == "verify":
+            return {
+                "exit_code": 0,
+                "output": "",
+                "result": {"verified": True, "tables": 0},
+            }
+
+        container = target["container"]
+        volume = container
+        loader = f"vprestore-{container[len(dbs.PREFIX) :]}"
+        aside = f"appendonlydir.before-restore-{int(time.time())}"
+        os.chmod(workdir, 0o755)
+        os.chmod(rdb, 0o644)
+        emit("step", f"Stopping {container}")
+        dbs._run(["docker", "stop", "-t", "30", container], 60)
+        swap = (
+            f"mv /data/appendonlydir /data/{aside} 2>/dev/null; "
+            "cp /restore/dump.rdb /data/dump.rdb && chown redis:redis /data/dump.rdb"
+        )
+        code, _, err = dbs._run(
+            ["docker", "run", "--rm", "-v", f"{volume}:/data",
+             "-v", f"{workdir}:/restore:ro", REDIS_IMAGE, "sh", "-c", swap],
+            120,
+        )  # fmt: skip
+        if code != 0:
+            dbs._run(["docker", "start", container], 60)
+            raise Failed(f"Couldn't copy the snapshot: {dbs._clean_error(err)}")
+        try:
+            emit("step", "Loading the snapshot")
+            dbs._run(["docker", "rm", "-f", loader], 30)
+            code, _, err = dbs._run(
+                ["docker", "run", "-d", "--name", loader, "-v", f"{volume}:/data",
+                 REDIS_IMAGE, "redis-server", "--appendonly", "no", "--save", ""],
+                60,
+            )  # fmt: skip
+            if code != 0:
+                raise Failed(f"Couldn't load the snapshot: {dbs._clean_error(err)}")
+
+            def cli(*command: str) -> str:
+                return dbs._run(["docker", "exec", loader, "redis-cli", *command], 60)[
+                    1
+                ]
+
+            deadline = time.monotonic() + 120
+            while "PONG" not in cli("PING") and time.monotonic() < deadline:
+                time.sleep(1)
+            keys = cli("DBSIZE").strip()
+            emit("info", f"Loaded {keys} keys")
+            cli("CONFIG", "SET", "appendonly", "yes")
+            deadline = time.monotonic() + DUMP_TIMEOUT
+            while time.monotonic() < deadline:
+                info = cli("INFO", "persistence")
+                if (
+                    "aof_enabled:1" in info
+                    and "aof_rewrite_in_progress:0" in info
+                    and "aof_rewrite_scheduled:0" in info
+                ):
+                    break
+                time.sleep(1)
+            else:
+                raise Failed("Redis didn't finish writing its append-only file")
+            cli("SHUTDOWN")
+            dbs._run(["docker", "wait", loader], 60)
+        except Failed:
+            # Put the previous data back.
+            dbs._run(["docker", "rm", "-f", loader], 30)
+            dbs._run(
+                ["docker", "run", "--rm", "-v", f"{volume}:/data", REDIS_IMAGE, "sh",
+                 "-c", f"[ -d /data/{aside} ] && mv /data/appendonlydir /data/appendonlydir.failed; mv /data/{aside} /data/appendonlydir"],
+                120,
+            )  # fmt: skip
+            dbs._run(["docker", "start", container], 60)
+            raise
+        finally:
+            dbs._run(["docker", "rm", "-f", loader], 30)
+        emit("step", f"Starting {container}")
+        dbs._run(["docker", "start", container], 60)
+        if not _redis_ready(container):
+            raise Failed(f"{container} didn't come back after the restore")
+        code, out, _ = dbs._run(
+            ["docker", "exec", container, "sh", "-c",
+             'REDISCLI_AUTH="$VP_REDIS_PASSWORD" redis-cli DBSIZE'],
+            30,
+        )  # fmt: skip
+        emit("info", f"{container} is back with {out.strip()} keys")
+        return {
+            "exit_code": 0,
+            "output": "",
+            "result": {"verified": True, "tables": 0, "keys": out.strip()},
+        }
+    finally:
+        import shutil
+
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 def delete(args: dict[str, Any]) -> dict[str, Any]:

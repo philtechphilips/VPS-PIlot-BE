@@ -27,6 +27,12 @@ def _tick() -> None:
         from app.backups import service as backups
 
         backups.run_due(db)
+        from app.databases import service as databases
+
+        databases.sample_due(db)
+        from app.core import artifacts
+
+        artifacts.prune()
         counts = service.evaluate(db)
         if counts["fired"] or counts["resolved"]:
             logger.info(

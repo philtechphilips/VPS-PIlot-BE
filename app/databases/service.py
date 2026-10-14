@@ -8,19 +8,27 @@ handed to the agent through the job-secrets channel, never stored in jobs.
 """
 
 import hashlib
+import ipaddress
 import json
 import re
 import secrets
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import quote
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.apps.models import Application
+from app.core import artifacts
+from app.core.config import settings
 from app.core.security import decrypt_secret, encrypt_secret, new_id
-from app.databases.models import DatabaseCredential, DatabaseInstance, DatabaseQuery
+from app.databases.models import (
+    DatabaseCredential,
+    DatabaseInstance,
+    DatabaseMetric,
+    DatabaseQuery,
+)
 from app.jobs import service as jobs
 from app.jobs.models import Job
 from app.servers.models import Server
@@ -216,9 +224,40 @@ def create_managed(
     return instance, job
 
 
+# Hosts that reach the server itself or cloud metadata. The agent resolves
+# names and checks the addresses too; this catches the obvious ones early.
+_BLOCKED_HOSTS = ("localhost", "metadata", "metadata.google.internal")
+
+
+def check_external_host(host: str) -> None:
+    name = host.strip("[]").lower().rstrip(".")
+    if name in _BLOCKED_HOSTS or name.endswith(".localhost"):
+        raise DbError(
+            422, f"{host} points at the server itself; use a managed database"
+        )
+    try:
+        address = ipaddress.ip_address(name)
+    except ValueError:
+        return
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+        address = address.ipv4_mapped
+    if (
+        address.is_loopback
+        or address.is_link_local
+        or address.is_unspecified
+        or address.is_multicast
+        or address.is_reserved
+    ):
+        raise DbError(
+            422,
+            f"{host} isn't allowed: it reaches the server itself or cloud metadata",
+        )
+
+
 def connect_external(
     db: Session, data: dict[str, Any], actor: str, label: str, request=None
 ) -> tuple[DatabaseInstance, Job]:
+    check_external_host(data["host"])
     server = _active_server(db, data["server_id"])
     _check_name(db, data["name"])
     engine = data["engine"]
@@ -235,33 +274,44 @@ def connect_external(
         admin_user=data.get("user") if engine != "redis" else None,
         admin_password=_enc(data["password"]) if data.get("password") else None,
         default_database=data.get("database"),
+        tls_mode=data.get("tls_mode") or "verify",
+        tls_ca=(data.get("ca") or "").strip() or None,
         status="checking",
         created_by=label[:64],
     )
     db.add(instance)
     db.flush()
-    # Connecting is proven by reading the server's stats (or Redis INFO).
-    if engine == "redis":
-        job = _queue(
-            db,
-            instance,
-            "db.redis",
-            {"target": target(instance), "action": "info"},
-            actor,
-            label,
-            request,
-        )
-    else:
-        job = _queue(
-            db,
-            instance,
-            "db.explore",
-            {"target": target(instance), "what": "stats"},
-            actor,
-            label,
-            request,
-        )
-    return instance, job
+    return instance, _check_connection(db, instance, actor, label, request)
+
+
+def _check_connection(
+    db: Session, instance: DatabaseInstance, actor: str, label: str, request=None
+) -> Job:
+    """Prove the connection by reading the server's stats (or Redis INFO)."""
+    if instance.engine == "redis":
+        payload = {"target": target(instance), "action": "info"}
+        return _queue(db, instance, "db.redis", payload, actor, label, request)
+    payload = {"target": target(instance), "what": "stats"}
+    return _queue(db, instance, "db.explore", payload, actor, label, request)
+
+
+def update_tls(
+    db: Session,
+    instance: DatabaseInstance,
+    mode: str,
+    ca: str | None,
+    actor: str,
+    label: str,
+) -> Job:
+    if instance.mode != "external":
+        raise DbError(409, "Managed databases are reached over the private network")
+    instance.tls_mode = mode
+    if ca is not None:
+        instance.tls_ca = ca or None
+    instance.status = "checking"
+    instance.error = None
+    db.commit()
+    return _check_connection(db, instance, actor, label)
 
 
 def target(instance: DatabaseInstance) -> dict[str, Any]:
@@ -279,6 +329,7 @@ def target(instance: DatabaseInstance) -> dict[str, Any]:
         "engine": instance.engine,
         "host": instance.host,
         "port": instance.port,
+        "tls": instance.tls_mode or "prefer",
     }
     if instance.admin_user:
         out["user"] = instance.admin_user
@@ -431,8 +482,13 @@ def job_result(db: Session, instance: DatabaseInstance, job_id: str) -> dict[str
     job = db.get(Job, job_id)
     if job is None or job.payload.get("instance_id") != instance.id:
         raise DbError(404, "Request not found")
-    out: dict[str, Any] = {"status": job.status, "error": job.error, "data": None}
-    if job.status == "succeeded":
+    out: dict[str, Any] = {
+        "status": job.status,
+        "error": job.error,
+        "data": None,
+        "result": job.result or None,
+    }
+    if job.status == "succeeded" and job.type not in ("db.export", "db.import"):
         text = jobs.job_output(job)
         try:
             out["data"] = json.loads(text) if text else None
@@ -448,7 +504,31 @@ def job_result(db: Session, instance: DatabaseInstance, job_id: str) -> dict[str
 
 def _sql_only(instance: DatabaseInstance) -> None:
     if instance.engine == "redis":
-        raise DbError(422, "Redis uses a single password here")
+        raise DbError(422, "Redis has no databases to manage here")
+
+
+def _redis_acl_ready(db: Session, instance: DatabaseInstance) -> bool:
+    """ACL users need agent 1.1.0."""
+    server = db.get(Server, instance.server_id)
+    try:
+        version = tuple(int(p) for p in (server.agent_version or "0").split(".")[:3])
+    except (AttributeError, ValueError):
+        return False
+    return version >= (1, 1, 0)
+
+
+def _acl_payload(
+    instance: DatabaseInstance, credential: DatabaseCredential
+) -> dict[str, Any]:
+    return {
+        "target": target(instance),
+        "action": "acl_setuser",
+        "user": credential.username,
+        "access": credential.access,
+        # For Redis logins, `database` holds the key pattern they may use.
+        "pattern": credential.database or "*",
+        "credential_id": credential.id,
+    }
 
 
 def create_database(
@@ -511,7 +591,15 @@ def create_user(
     application: Application | None = None,
     env_key: str | None = None,
 ) -> tuple[DatabaseCredential, Job]:
-    _sql_only(instance)
+    if instance.engine == "redis":
+        if access not in ("readwrite", "readonly"):
+            raise DbError(422, "Redis logins are read-write or read-only")
+        if username == "default":
+            raise DbError(409, "default is the admin login")
+        if not _redis_acl_ready(db, instance):
+            raise DbError(
+                409, "Upgrade this server's agent to 1.1.0 to add Redis logins"
+            )
     if db.scalar(
         select(DatabaseCredential).where(
             DatabaseCredential.instance_id == instance.id,
@@ -533,6 +621,19 @@ def create_user(
     )
     db.add(credential)
     db.flush()
+    if instance.engine == "redis":
+        job = _queue(
+            db,
+            instance,
+            "db.redis",
+            _acl_payload(instance, credential),
+            actor,
+            label,
+            request,
+        )
+        credential.job_id = job.id
+        db.commit()
+        return credential, job
     payload = {
         "target": target(instance),
         "action": "create_user",
@@ -556,9 +657,21 @@ def rotate_password(
     label: str,
     request=None,
 ) -> Job:
-    _sql_only(instance)
     credential.pending_password = _enc(generate_password())
     db.flush()
+    if instance.engine == "redis":
+        job = _queue(
+            db,
+            instance,
+            "db.redis",
+            _acl_payload(instance, credential),
+            actor,
+            label,
+            request,
+        )
+        credential.job_id = job.id
+        db.commit()
+        return job
     job = _queue(
         db,
         instance,
@@ -586,7 +699,18 @@ def drop_user(
     label: str,
     request=None,
 ) -> Job:
-    _sql_only(instance)
+    if instance.engine == "redis":
+        if username == "default":
+            raise DbError(409, "VPSPilot needs the admin login")
+        return _queue(
+            db,
+            instance,
+            "db.redis",
+            {"target": target(instance), "action": "acl_deluser", "user": username},
+            actor,
+            label,
+            request,
+        )
     if username == instance.admin_user:
         raise DbError(409, "VPSPilot needs the admin user")
     return _queue(
@@ -624,7 +748,8 @@ def connection_url(
     )
     port = port or instance.port
     if instance.engine == "redis":
-        auth = f":{quote(password, safe='')}@" if password else ""
+        user = quote(username, safe="") if username else ""
+        auth = f"{user}:{quote(password, safe='')}@" if password else ""
         return f"redis://{auth}{host}:{port}/0"
     auth = f"{quote(username or '', safe='')}:{quote(password or '', safe='')}@"
     return f"{scheme}://{auth}{host}:{port}/{database or ''}"
@@ -676,6 +801,21 @@ def connection_details(db: Session, instance: DatabaseInstance) -> dict[str, Any
     return {"logins": logins, "local_url": local}
 
 
+def _unique_username(db: Session, instance: DatabaseInstance, name: str) -> str:
+    base = re.sub(r"[^a-z0-9_]", "_", name.lower())[:40]
+    username = base
+    n = 1
+    while db.scalar(
+        select(DatabaseCredential).where(
+            DatabaseCredential.instance_id == instance.id,
+            DatabaseCredential.username == username,
+        )
+    ):
+        n += 1
+        username = f"{base}_{n}"
+    return username
+
+
 def attach_to_app(
     db: Session,
     instance: DatabaseInstance,
@@ -694,6 +834,21 @@ def attach_to_app(
         )
     if any(e["key"] == env_key for e in application.env or []):
         raise DbError(409, f"{application.name} already has {env_key}")
+    if instance.engine == "redis" and _redis_acl_ready(db, instance):
+        # Its own login: no admin or dangerous commands.
+        username = _unique_username(db, instance, application.name)
+        return create_user(
+            db,
+            instance,
+            username,
+            None,
+            "readwrite",
+            actor,
+            label,
+            request,
+            application,
+            env_key,
+        )
     if instance.engine == "redis":
         from app.apps import service as apps
 
@@ -708,17 +863,7 @@ def attach_to_app(
         )
         db.commit()
         return None, None
-    base = re.sub(r"[^a-z0-9_]", "_", application.name.lower())[:40]
-    username = base
-    n = 1
-    while db.scalar(
-        select(DatabaseCredential).where(
-            DatabaseCredential.instance_id == instance.id,
-            DatabaseCredential.username == username,
-        )
-    ):
-        n += 1
-        username = f"{base}_{n}"
+    username = _unique_username(db, instance, application.name)
     # The app gets its own database, then a user that can do everything in
     # it (so migrations work) and nothing elsewhere. Jobs run in order.
     create_database(db, instance, username, None, actor, label, request)
@@ -749,18 +894,212 @@ def job_secrets(db: Session, job: Job) -> dict[str, Any]:
     out: dict[str, Any] = {}
     if instance.admin_password:
         out["password"] = _dec(instance.admin_password)
+    if instance.tls_ca:
+        out["ca"] = instance.tls_ca
     if job.type == "db.query":
         query = db.get(DatabaseQuery, job.payload.get("query_id"))
         if query is not None and query.instance_id == instance.id:
             out["sql"] = _dec(query.sql)
     credential_id = job.payload.get("credential_id")
-    if job.type == "db.admin" and credential_id:
+    if job.type in ("db.admin", "db.redis") and credential_id:
         credential = db.get(DatabaseCredential, credential_id)
         if credential is not None and credential.instance_id == instance.id:
             out["new_password"] = _dec(
                 credential.pending_password or credential.password
             )
     return out
+
+
+# ---------------------------------------------------------------------------
+# Export and import (through encrypted, temporary artifacts)
+# ---------------------------------------------------------------------------
+
+
+def export(
+    db: Session,
+    instance: DatabaseInstance,
+    database: str,
+    actor: str,
+    label: str,
+    request=None,
+) -> Job:
+    _sql_only(instance)
+    payload = {"target": target(instance), "database": database}
+    return _queue(db, instance, "db.export", payload, actor, label, request)
+
+
+def export_file(
+    db: Session, instance: DatabaseInstance, job_id: str
+) -> tuple[str, str]:
+    """(artifact name, download file name) of a finished export."""
+    job = db.get(Job, job_id)
+    if (
+        job is None
+        or job.type != "db.export"
+        or job.payload.get("instance_id") != instance.id
+    ):
+        raise DbError(404, "Export not found")
+    if job.status != "succeeded":
+        raise DbError(409, "The export isn't ready")
+    name = f"{job.id}.out"
+    if not artifacts.exists(name):
+        raise DbError(410, "This export expired (exports are kept for a day)")
+    stamp = (job.finished_at or _now()).strftime("%Y%m%d-%H%M")
+    return name, f"{instance.name}-{job.payload['database']}-{stamp}.sql.gz"
+
+
+def sniff_format(instance: DatabaseInstance, head: bytes) -> str:
+    if head.startswith(b"\x1f\x8b"):
+        return "sql.gz"
+    if head.startswith(b"PGDMP"):
+        if instance.engine != "postgres":
+            raise DbError(422, "That's a PostgreSQL archive (pg_dump -Fc)")
+        return "pgdump"
+    try:
+        head[:4096].decode("utf-8")
+    except UnicodeDecodeError as error:
+        if error.start < 4090:  # not just a cut multi-byte character
+            raise DbError(
+                422, "Upload a .sql file, a .sql.gz file or a pg_dump archive"
+            ) from None
+    return "sql"
+
+
+def queue_import(
+    db: Session,
+    instance: DatabaseInstance,
+    database: str,
+    upload_id: str,
+    size: int,
+    actor: str,
+    label: str,
+    request=None,
+) -> Job:
+    _sql_only(instance)
+    name = f"{upload_id}.in"
+    head = next(iter(artifacts.read(name)), b"")
+    try:
+        fmt = sniff_format(instance, head)
+    except DbError:
+        artifacts.delete(name)
+        raise
+    payload = {
+        "target": target(instance),
+        "database": database,
+        "format": fmt,
+        "upload_id": upload_id,
+        "size": size,
+    }
+    return _queue(db, instance, "db.import", payload, actor, label, request)
+
+
+# ---------------------------------------------------------------------------
+# Metrics history
+# ---------------------------------------------------------------------------
+
+SAMPLE_EVERY = timedelta(minutes=5)
+
+
+def sample_due(db: Session) -> int:
+    """Queue a stats read for each running database not sampled lately.
+    Called by the monitoring worker; samples land in on_job_finished."""
+    from app.servers import service as servers
+
+    now = _now()
+    cutoff = now - timedelta(days=settings.metrics_retention_days)
+    db.execute(delete(DatabaseMetric).where(DatabaseMetric.ts < cutoff))
+    queued = 0
+    for instance in db.scalars(
+        select(DatabaseInstance).where(DatabaseInstance.status == "running")
+    ):
+        last = instance.sampled_at
+        if last is not None and now - _aware(last) < SAMPLE_EVERY:
+            continue
+        server = db.get(Server, instance.server_id)
+        if server is None or servers.status_of(server, now) != "online":
+            continue
+        instance.sampled_at = now
+        try:
+            if instance.engine == "redis":
+                payload = {"target": target(instance), "action": "info", "sample": True}
+                _queue(
+                    db, instance, "db.redis", payload, "system", "VPSPilot", None, False
+                )
+            else:
+                payload = {"target": target(instance), "what": "stats", "sample": True}
+                _queue(
+                    db,
+                    instance,
+                    "db.explore",
+                    payload,
+                    "system",
+                    "VPSPilot",
+                    None,
+                    False,
+                )
+            queued += 1
+        except DbError:
+            continue
+    db.commit()
+    return queued
+
+
+def _aware(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=UTC)
+
+
+def _number(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _store_sample(db: Session, instance: DatabaseInstance, job: Job) -> None:
+    try:
+        data = json.loads(jobs.job_output(job) or "{}")
+    except ValueError:
+        return
+    metric = DatabaseMetric(instance_id=instance.id, ts=job.finished_at or _now())
+    if instance.engine == "redis":
+        info = data.get("info") or {}
+        for field, key in (
+            ("connections", "connected_clients"),
+            ("max_connections", "maxclients"),
+            ("memory_bytes", "used_memory"),
+        ):
+            value = _number(info.get(key))
+            setattr(metric, field, int(value) if value is not None else None)
+        metric.ops_per_sec = _number(info.get("instantaneous_ops_per_sec"))
+        metric.keys = int(data.get("keys") or 0)
+    else:
+        try:
+            row = dict(zip(data["columns"], data["rows"][0], strict=False))
+        except (KeyError, IndexError, TypeError):
+            return
+        for field, key in (
+            ("connections", "connections"),
+            ("max_connections", "max_connections"),
+            ("size_bytes", "size"),
+        ):
+            value = _number(row.get(key))
+            setattr(metric, field, int(value) if value is not None else None)
+    db.add(metric)
+
+
+def metrics(
+    db: Session, instance: DatabaseInstance, hours: int
+) -> list[DatabaseMetric]:
+    since = _now() - timedelta(hours=hours)
+    return list(
+        db.scalars(
+            select(DatabaseMetric)
+            .where(
+                DatabaseMetric.instance_id == instance.id, DatabaseMetric.ts >= since
+            )
+            .order_by(DatabaseMetric.ts)
+        )
+    )
 
 
 def on_job_finished(db: Session, job: Job) -> None:
@@ -770,6 +1109,14 @@ def on_job_finished(db: Session, job: Job) -> None:
     if instance is None:
         return
     ok = job.status == "succeeded"
+    if job.type == "db.import":
+        artifacts.delete(f"{job.payload.get('upload_id')}.in")
+    if job.type == "db.export" and not ok:
+        artifacts.delete(f"{job.id}.out")
+    if job.payload.get("sample"):
+        if ok:
+            _store_sample(db, instance, job)
+        return
     if job.type == "db.create":
         instance.status = "running" if ok else "error"
         instance.error = None if ok else (job.error or f"Job {job.status}")[:500]
@@ -796,13 +1143,30 @@ def on_job_finished(db: Session, job: Job) -> None:
                 pass
     if job.type == "db.admin":
         _admin_finished(db, instance, job, ok)
+    if job.type == "db.redis" and job.payload.get("action") in (
+        "acl_setuser",
+        "acl_deluser",
+    ):
+        # Same bookkeeping as SQL logins: first set creates, later ones rotate.
+        credential = db.get(DatabaseCredential, job.payload.get("credential_id") or "")
+        if job.payload["action"] == "acl_deluser":
+            action = "drop_user"
+        elif credential is not None and credential.status == "pending":
+            action = "create_user"
+        else:
+            action = "set_password"
+        _admin_finished(db, instance, job, ok, action)
 
 
 def _admin_finished(
-    db: Session, instance: DatabaseInstance, job: Job, ok: bool
+    db: Session,
+    instance: DatabaseInstance,
+    job: Job,
+    ok: bool,
+    action: str | None = None,
 ) -> None:
     credential = db.get(DatabaseCredential, job.payload.get("credential_id") or "")
-    action = job.payload.get("action")
+    action = action or job.payload.get("action")
     if action == "create_user" and credential is not None:
         if not ok:
             db.delete(credential)

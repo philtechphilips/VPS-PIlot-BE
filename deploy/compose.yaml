@@ -31,6 +31,9 @@ services:
     environment:
       DATABASE_HOSTNAME: vpspilot-db
       DATABASE_PORT: "5432"
+    volumes:
+      # Database exports/imports in transit (encrypted, kept for a day).
+      - vpspilot-data:/app/data
     depends_on:
       db:
         condition: service_healthy
@@ -56,3 +59,4 @@ networks:
 
 volumes:
   vpspilot-db: {}
+  vpspilot-data: {}

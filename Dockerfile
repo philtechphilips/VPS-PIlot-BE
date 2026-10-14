@@ -6,7 +6,9 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 COPY . .
-RUN uv sync --frozen --no-dev && useradd --system --uid 1001 vpspilot && chown -R vpspilot /app
+# /app/data: encrypted export/import files (a volume in compose.yaml).
+RUN uv sync --frozen --no-dev && useradd --system --uid 1001 vpspilot \
+    && mkdir -p /app/data && chown -R vpspilot /app
 ENV PATH=/app/.venv/bin:$PATH
 USER vpspilot
 EXPOSE 8000

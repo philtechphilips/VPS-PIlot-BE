@@ -60,6 +60,10 @@ class Settings(BaseSettings):
     # Alert rules are evaluated in the API process this often (0 disables).
     alerts_evaluate_seconds: int = 30
 
+    # Database exports and imports pass through here, encrypted, for a day.
+    artifacts_dir: str = "data/artifacts"
+    max_transfer_mb: int = 1024
+
     # Used to build links in emails, e.g. the password reset link
     frontend_url: str = "http://localhost:3000"
 

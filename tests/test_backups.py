@@ -188,16 +188,17 @@ def test_verify_and_restore(client, admin_headers, db: Session):
     )
 
 
-def test_redis_restore_is_refused_but_verify_allowed(client, admin_headers):
+def test_redis_restores_in_place_only(client, admin_headers):
     instance, agent, _ = managed(client, admin_headers, engine="redis", name="cache")
     run = backup_once(client, admin_headers, agent, instance["id"])
     assert run["database"] == "redis"
-    assert (
-        client.post(
-            f"{BK}/{run['id']}/restore", json={"mode": "replace"}, headers=admin_headers
-        ).status_code
-        == 409
+    new = {"mode": "new", "into": "copy"}
+    response = client.post(f"{BK}/{run['id']}/restore", json=new, headers=admin_headers)
+    assert response.status_code == 409
+    replace = client.post(
+        f"{BK}/{run['id']}/restore", json={"mode": "replace"}, headers=admin_headers
     )
+    assert replace.status_code == 202, replace.text
     assert (
         client.post(f"{BK}/{run['id']}/verify", headers=admin_headers).status_code
         == 202

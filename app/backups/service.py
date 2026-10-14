@@ -105,6 +105,8 @@ def job_secrets(db: Session, job: Job) -> dict[str, Any]:
     instance = db.get(DatabaseInstance, job.payload.get("instance_id") or "")
     if instance is not None and instance.admin_password:
         out["password"] = decrypt_secret(instance.admin_password, databases.PURPOSE)
+    if instance is not None and instance.tls_ca:
+        out["ca"] = instance.tls_ca
     return out
 
 
@@ -273,9 +275,11 @@ def _restore_job(
     instance = db.get(DatabaseInstance, run.instance_id)
     if instance is None or instance.status != "running":
         raise BackupError(409, "The database must be running")
-    if instance.engine == "redis" and mode != "verify":
+    if instance.engine == "redis" and mode == "new":
+        raise BackupError(409, "Redis snapshots restore into the same instance")
+    if instance.engine == "redis" and mode == "replace" and instance.mode != "managed":
         raise BackupError(
-            409, "Redis backups can be verified here; restoring Redis is manual for now"
+            409, "Restore external Redis by hand; VPSPilot replaces data it runs"
         )
     target, storage, _ = _target_and_storage(db, instance)
     payload: dict[str, Any] = {

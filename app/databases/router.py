@@ -1,13 +1,17 @@
 from datetime import datetime
 from typing import Annotated, Literal, NoReturn
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, StringConstraints
 
 from app.apps.models import Application
 from app.audit import service as audit
 from app.auth.dependencies import AdminUser
+from app.core import artifacts
+from app.core.config import settings
 from app.core.database import DbSession
+from app.core.security import new_id
 from app.databases import service
 from app.databases.models import DatabaseCredential, DatabaseInstance
 from app.jobs import service as jobs
@@ -36,6 +40,20 @@ class ManagedCreate(BaseModel):
     local_port: HostPort | None = None
 
 
+# disable: no TLS; require: encrypted, certificate not checked;
+# verify: encrypted and the certificate must match the host.
+TlsMode = Literal["disable", "require", "verify"]
+CaPem = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        max_length=65536,
+        pattern=r"^(-----BEGIN CERTIFICATE-----\r?\n[A-Za-z0-9+/=\r\n]+"
+        r"-----END CERTIFICATE-----\s*)+$",
+    ),
+]
+
+
 class ExternalCreate(BaseModel):
     name: Name
     server_id: Annotated[str, StringConstraints(max_length=32)]
@@ -47,6 +65,14 @@ class ExternalCreate(BaseModel):
     ) = None
     password: Annotated[str, StringConstraints(max_length=512)] | None = None
     database: DbIdent | None = None
+    tls_mode: TlsMode = "verify"
+    ca: CaPem | None = None
+
+
+class TlsIn(BaseModel):
+    tls_mode: TlsMode
+    # None keeps the stored CA; "" removes it (system CAs are used).
+    ca: CaPem | Literal[""] | None = None
 
 
 class ControlIn(BaseModel):
@@ -68,7 +94,7 @@ class ExploreIn(BaseModel):
 
 
 class RedisIn(BaseModel):
-    action: Literal["info", "scan", "get", "delete"]
+    action: Literal["info", "scan", "get", "delete", "acl_list"]
     pattern: Annotated[str, StringConstraints(max_length=200)] | None = None
     cursor: Annotated[int, Field(ge=0)] = 0
     count: Annotated[int, Field(ge=1, le=1000)] = 100
@@ -84,6 +110,11 @@ class UserIn(BaseModel):
     username: DbIdent
     database: DbIdent | None = None
     access: Literal["owner", "readwrite", "readonly"] = "readwrite"
+    # Redis: the keys this login may use, e.g. "cache:*" (default: all).
+    key_pattern: (
+        Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_.:*{}\[\]-]{1,63}$")]
+        | None
+    ) = None
 
 
 class AttachIn(BaseModel):
@@ -108,6 +139,8 @@ class InstanceOut(BaseModel):
     status: str
     error: str | None
     server_version: str | None
+    tls_mode: str | None
+    has_ca: bool
     created_by: str
     created_at: datetime
     users: int
@@ -134,6 +167,8 @@ def _out(db, instance: DatabaseInstance) -> InstanceOut:
         status=service.live_status(db, instance),
         error=instance.error,
         server_version=instance.server_version,
+        tls_mode=instance.tls_mode,
+        has_ca=bool(instance.tls_ca),
         created_by=instance.created_by,
         created_at=instance.created_at,
         users=len(service.credentials(db, instance)),
@@ -236,6 +271,119 @@ def connect_external(
 def get_database(instance_id: str, db: DbSession, _: AdminUser):
     jobs.reap(db)
     return _out(db, _get(db, instance_id))
+
+
+class ExportIn(BaseModel):
+    database: DbIdent
+
+
+@router.post("/{instance_id}/export", status_code=status.HTTP_202_ACCEPTED)
+def export_database(
+    instance_id: str, body: ExportIn, request: Request, db: DbSession, user: AdminUser
+):
+    """Dump one database as SQL (gzip). Download it when the job succeeds."""
+    instance = _get(db, instance_id)
+    actor, label = audit.user_actor(user)
+    try:
+        job = service.export(db, instance, body.database, actor, label, request)
+    except service.DbError as error:
+        _raise(error)
+    _audit(db, user, request, "database.export", instance, body.database)
+    return _job(job)
+
+
+@router.get("/{instance_id}/exports/{job_id}")
+def download_export(
+    instance_id: str, job_id: str, request: Request, db: DbSession, user: AdminUser
+):
+    instance = _get(db, instance_id)
+    try:
+        name, filename = service.export_file(db, instance, job_id)
+    except service.DbError as error:
+        _raise(error)
+    _audit(db, user, request, "database.export.download", instance, filename)
+    return StreamingResponse(
+        artifacts.read(name),
+        media_type="application/gzip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.post("/{instance_id}/import", status_code=status.HTTP_202_ACCEPTED)
+async def import_database(
+    instance_id: str,
+    request: Request,
+    db: DbSession,
+    user: AdminUser,
+    database: Annotated[str, Query(pattern=r"^[a-z_][a-z0-9_]{0,62}$")],
+):
+    """Upload a .sql, .sql.gz or pg_dump file as the request body; the agent
+    loads it into `database` (one transaction on PostgreSQL)."""
+    instance = _get(db, instance_id)
+    if instance.engine == "redis":
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, "Use backups for Redis"
+        )
+    upload_id = new_id()
+    try:
+        size = await artifacts.write(
+            f"{upload_id}.in",
+            request.stream(),
+            settings.max_transfer_mb * 1024 * 1024,
+        )
+    except artifacts.TooLarge as error:
+        raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, str(error)) from None
+    if size == 0:
+        artifacts.delete(f"{upload_id}.in")
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "The file is empty")
+    actor, label = audit.user_actor(user)
+    try:
+        job = service.queue_import(
+            db, instance, database, upload_id, size, actor, label, request
+        )
+    except service.DbError as error:
+        artifacts.delete(f"{upload_id}.in")
+        _raise(error)
+    _audit(db, user, request, "database.import", instance, f"{database} ({size} bytes)")
+    return _job(job)
+
+
+@router.get("/{instance_id}/metrics")
+def database_metrics(
+    instance_id: str,
+    db: DbSession,
+    _: AdminUser,
+    hours: Annotated[int, Query(ge=1, le=24 * 30)] = 24,
+):
+    """Samples every 5 minutes: connections, size (SQL), memory/keys/ops (Redis)."""
+    instance = _get(db, instance_id)
+    return [
+        {
+            "ts": m.ts,
+            "connections": m.connections,
+            "max_connections": m.max_connections,
+            "size_bytes": m.size_bytes,
+            "memory_bytes": m.memory_bytes,
+            "keys": m.keys,
+            "ops_per_sec": m.ops_per_sec,
+        }
+        for m in service.metrics(db, instance, hours)
+    ]
+
+
+@router.put("/{instance_id}/tls", status_code=status.HTTP_202_ACCEPTED)
+def update_tls(
+    instance_id: str, body: TlsIn, request: Request, db: DbSession, user: AdminUser
+):
+    """Change how an external database is reached; the agent re-checks."""
+    instance = _get(db, instance_id)
+    actor, label = audit.user_actor(user)
+    try:
+        job = service.update_tls(db, instance, body.tls_mode, body.ca, actor, label)
+    except service.DbError as error:
+        _raise(error)
+    _audit(db, user, request, "database.tls", instance, body.tls_mode)
+    return {"database": _out(db, instance), "job_id": job.id}
 
 
 @router.delete("/{instance_id}", status_code=status.HTTP_202_ACCEPTED)
@@ -394,7 +542,7 @@ def create_user(
             db,
             instance,
             body.username,
-            body.database,
+            body.key_pattern if instance.engine == "redis" else body.database,
             body.access,
             actor,
             label,

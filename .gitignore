@@ -15,3 +15,6 @@ wheels/
 # Tool caches
 .pytest_cache/
 .ruff_cache/
+
+# Database export/import files (encrypted, temporary)
+data/

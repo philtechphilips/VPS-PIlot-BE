@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from collections.abc import Callable
 from typing import Any
 
-from vpspilot_agent import helper
+from vpspilot_agent import helper, transfers
 from vpspilot_agent.client import ApiError, Client, NotEnrolled
 
 log = logging.getLogger("vpspilot_agent")
@@ -33,6 +34,8 @@ SUPPORTED = {
     "db.explore",
     "db.admin",
     "db.redis",
+    "db.export",
+    "db.import",
     "logs.read",
     "proxy.apply",
     "proxy.status",
@@ -50,6 +53,8 @@ STREAMING = {
     "proxy.apply",
     "backup.create",
     "backup.restore",
+    "db.export",
+    "db.import",
 }
 # Read-only, frequent: no "Running ..." progress event.
 QUIET = {"app.logs", "logs.read", "db.query", "db.explore", "db.redis", "proxy.status"}
@@ -204,6 +209,25 @@ def _run_streaming(
             return finish(
                 False, None, "", f"Couldn't load credentials: {error.message}"
             )
+    transfer = None
+    if job["type"] in ("db.export", "db.import"):
+        args["job_id"] = job["id"]
+    if job["type"] == "db.import":
+        # The uploaded file comes down to the agent's own directory first.
+        transfer = os.path.join(transfers.IN_DIR, f"{job['id']}.in")
+        try:
+            os.makedirs(transfers.IN_DIR, mode=0o700, exist_ok=True)
+            if os.path.lexists(transfer):
+                os.unlink(transfer)
+            client.download(f"{base}/artifact", transfer)
+        except (ApiError, OSError) as error:
+            if isinstance(error, NotEnrolled):
+                raise
+            if os.path.lexists(transfer):
+                os.unlink(transfer)
+            message = getattr(error, "message", None) or str(error)
+            return finish(False, None, "", f"Couldn't download the file: {message}")
+        args["path"] = transfer
     sink = EventSink(client, base)
     try:
         result = call(job["type"], args, timeout=STREAM_IDLE_TIMEOUT, on_event=sink)
@@ -212,12 +236,35 @@ def _run_streaming(
         return finish(
             False, None, sink.output(), f"Privileged helper unavailable: {error}"
         )
-    sink.flush()
+    finally:
+        if transfer and os.path.lexists(transfer):
+            os.unlink(transfer)
     ok = bool(result.get("ok"))
+    error = None if ok else (result.get("error") or "The operation failed")
+    data = dict(result.get("result") or {})
+    if job["type"] == "db.export":
+        path = data.pop("path", None)
+        if ok and path:
+            sink("step", "Uploading to the control plane")
+            try:
+                client.upload(f"{base}/artifact", path)
+            except (ApiError, OSError) as upload_error:
+                if isinstance(upload_error, NotEnrolled):
+                    raise
+                ok = False
+                error = "Couldn't upload the export: " + (
+                    getattr(upload_error, "message", None) or str(upload_error)
+                )
+            finally:
+                try:
+                    call("transfer.cleanup", {"job_id": job["id"]})
+                except OSError:
+                    pass
+    sink.flush()
     return finish(
         ok,
-        result.get("exit_code"),
+        result.get("exit_code") if ok or result.get("exit_code") else 1,
         sink.output() or result.get("output", ""),
-        None if ok else (result.get("error") or "The operation failed"),
-        {k: v for k, v in (result.get("result") or {}).items() if v is not None},
+        error,
+        {k: v for k, v in data.items() if v is not None},
     )

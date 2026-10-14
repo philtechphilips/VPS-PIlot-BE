@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.responses import PlainTextResponse, Response
+from fastapi.responses import PlainTextResponse, Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 
@@ -16,6 +16,7 @@ from app.apps import service as apps
 from app.apps.models import Application
 from app.audit import service as audit
 from app.backups import service as backups
+from app.core import artifacts
 from app.core.config import settings
 from app.core.database import DbSession
 from app.databases import service as databases
@@ -169,6 +170,47 @@ def job_secrets(job_id: str, agent: Agent, db: DbSession):
         if token:
             reply["git_token"] = token
     return reply
+
+
+@router.put("/v1/jobs/{job_id}/artifact", status_code=status.HTTP_202_ACCEPTED)
+async def upload_artifact(job_id: str, request: Request, agent: Agent, db: DbSession):
+    """A database export, streamed up by the agent running the job."""
+    job = jobs.get(db, job_id)
+    if (
+        job is None
+        or job.server_id != agent.id
+        or job.status != "running"
+        or job.type != "db.export"
+    ):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No upload for this job")
+    try:
+        size = await artifacts.write(
+            f"{job.id}.out",
+            request.stream(),
+            settings.max_transfer_mb * 1024 * 1024,
+        )
+    except artifacts.TooLarge as error:
+        raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, str(error)) from None
+    return {"size": size}
+
+
+@router.get("/v1/jobs/{job_id}/artifact")
+def download_artifact(job_id: str, agent: Agent, db: DbSession):
+    """The uploaded file a database import job loads."""
+    job = jobs.get(db, job_id)
+    if (
+        job is None
+        or job.server_id != agent.id
+        or job.status != "running"
+        or job.type != "db.import"
+    ):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No file for this job")
+    name = f"{job.payload['upload_id']}.in"
+    if not artifacts.exists(name):
+        raise HTTPException(status.HTTP_410_GONE, "The upload expired")
+    return StreamingResponse(
+        artifacts.read(name), media_type="application/octet-stream"
+    )
 
 
 @router.post("/v1/jobs/{job_id}/events", status_code=status.HTTP_202_ACCEPTED)

@@ -39,7 +39,8 @@ from vpspilot_agent import deploy as d
 
 ROOT = "/srv/vpspilot"
 UNIT_DIR = "/etc/systemd/system"
-ENV_DIR = "/etc/vpspilot/apps"
+# Root-owned: /etc/vpspilot belongs to the (unprivileged) agent user.
+ENV_DIR = "/etc/vpspilot-apps"
 RUNTIMES = "/opt/vpspilot/runtimes"
 KEEP_RELEASES = 5
 NODE_DIST = "https://nodejs.org/dist"

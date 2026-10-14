@@ -26,7 +26,7 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
-from vpspilot_agent import backups, databases, deploy, logs, proxy
+from vpspilot_agent import backups, databases, deploy, logs, proxy, transfers
 from vpspilot_agent.errors import Rejected
 
 log = logging.getLogger("vpspilot_helper")
@@ -140,6 +140,7 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     **logs.OPERATIONS,
     **proxy.OPERATIONS,
     **backups.OPERATIONS,
+    **transfers.OPERATIONS,
 }
 
 # Long operations that report progress as they go.
@@ -148,6 +149,7 @@ STREAMING_OPS = {
     **databases.STREAMING,
     **proxy.STREAMING,
     **backups.STREAMING,
+    **transfers.STREAMING,
 }
 
 
@@ -211,9 +213,13 @@ def _serve_one(conn: socket.socket, allowed: set[int]) -> None:
                 raw += chunk
             request = json.loads(raw or b"{}")
             args = request.get("args") or {}
-            # Log the shape, never env values.
+            # Log the shape, never env values, passwords or tokens.
             shown = (
-                {k: v for k, v in args.items() if k != "env"}
+                {
+                    k: v
+                    for k, v in args.items()
+                    if k not in ("env", "secrets", "git_token")
+                }
                 if isinstance(args, dict)
                 else {}
             )

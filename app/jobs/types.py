@@ -204,6 +204,7 @@ class DbTarget(Strict):
     ) = None
     host: DbHost | None = None  # external
     port: Port | None = None
+    tls: Literal["disable", "prefer", "require", "verify"] | None = None
 
 
 class DbJob(Strict):
@@ -245,6 +246,8 @@ class DbQueryPayload(DbJob):
 class DbExplorePayload(DbJob):
     target: DbTarget
     what: Literal["databases", "users", "stats", "tables", "columns"]
+    # A periodic metrics sample (stored, not shown to anyone).
+    sample: bool = False
     database: DbIdent | None = None
     namespace: DbObject | None = None  # schema (PostgreSQL) or database (MySQL)
     table: DbObject | None = None
@@ -263,7 +266,14 @@ class DbAdminPayload(DbJob):
 
 class DbRedisPayload(DbJob):
     target: DbTarget
-    action: Literal["info", "scan", "get", "delete"]
+    action: Literal[
+        "info", "scan", "get", "delete", "acl_list", "acl_setuser", "acl_deluser"
+    ]
+    # ACL logins (the password comes with the job's secrets)
+    user: DbIdent | None = None
+    access: Literal["readwrite", "readonly"] | None = None
+    credential_id: HexId | None = None
+    sample: bool = False
     pattern: (
         Annotated[str, StringConstraints(pattern=r"^[^\x00-\x1f\x7f]{1,200}$")] | None
     ) = None
@@ -272,6 +282,23 @@ class DbRedisPayload(DbJob):
     key: (
         Annotated[str, StringConstraints(pattern=r"^[^\x00-\x1f\x7f]{1,512}$")] | None
     ) = None
+
+
+class DbExportPayload(DbJob):
+    """Dump one database as portable SQL (gzip); the agent uploads it."""
+
+    target: DbTarget
+    database: DbIdent
+
+
+class DbImportPayload(DbJob):
+    """Load an uploaded SQL file (or pg_dump archive) into a database."""
+
+    target: DbTarget
+    database: DbIdent
+    format: Literal["sql", "sql.gz", "pgdump"]
+    upload_id: HexId
+    size: Annotated[int, Field(ge=0)]
 
 
 class LogsReadPayload(Strict):
@@ -397,6 +424,8 @@ JOB_TYPES: dict[str, type[Strict]] = {
     "db.explore": DbExplorePayload,
     "db.admin": DbAdminPayload,
     "db.redis": DbRedisPayload,
+    "db.export": DbExportPayload,
+    "db.import": DbImportPayload,
     "app.deploy": AppDeployPayload,
     "app.remove": AppRemovePayload,
     "app.logs": AppLogsPayload,

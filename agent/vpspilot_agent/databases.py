@@ -16,10 +16,13 @@ Rules that keep this safe:
 from __future__ import annotations
 
 import csv
+import hashlib
+import ipaddress
 import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import tempfile
 import threading
@@ -50,6 +53,22 @@ ENGINES: dict[str, dict[str, Any]] = {
     "mariadb": {"images": {"11": "mariadb:11"}, "port": 3306, "data": "/var/lib/mysql"},
     "redis": {"images": {"7": "redis:7-alpine"}, "port": 6379, "data": "/data"},
 }
+
+# External connections: TLS mode, and where each client image keeps the
+# system CA bundle (for "verify" without a custom CA).
+TLS_MODES = ("disable", "prefer", "require", "verify")
+SYSTEM_CA = {
+    "postgres": "/etc/ssl/certs/ca-certificates.crt",
+    "mysql": "/etc/pki/tls/certs/ca-bundle.crt",
+    "mariadb": "/etc/ssl/certs/ca-certificates.crt",
+    "redis": "/etc/ssl/certs/ca-certificates.crt",
+}
+CA_PATH = "/vp-ca.pem"
+CA_RE = re.compile(
+    r"(-----BEGIN CERTIFICATE-----\r?\n[A-Za-z0-9+/=\r\n]+-----END CERTIFICATE-----\s*)+"
+)
+# Names that reach the server itself or cloud metadata services.
+BLOCKED_NAMES = ("localhost", "metadata.google.internal", "metadata")
 
 PG_NULL = "\\N"  # how psql prints NULL, so it differs from ''
 MAX_ROWS = 1000
@@ -118,10 +137,22 @@ def _target(args: dict[str, Any]) -> dict[str, Any]:
         }
     if target.get("mode") == "external":
         image = ENGINES[engine]["images"][sorted(ENGINES[engine]["images"])[-1]]
+        host = _match(HOST_RE, target.get("host"), "host")
+        tls = target.get("tls", "prefer")
+        if tls not in TLS_MODES:
+            raise Rejected("invalid TLS mode")
+        ca = secrets.get("ca")
+        if ca is not None and (
+            not isinstance(ca, str) or len(ca) > 65536 or not CA_RE.fullmatch(ca)
+        ):
+            raise Rejected("invalid CA certificate")
         return {
             "mode": "external",
             "engine": engine,
-            "host": _match(HOST_RE, target.get("host"), "host"),
+            "host": host,
+            "address": guard_host(host),
+            "tls": tls,
+            "ca": ca,
             "port": _int(target.get("port"), 1, 65535, "port"),
             "user": (
                 _match(re.compile(r"[A-Za-z0-9_.@-]{1,63}"), target.get("user"), "user")
@@ -132,6 +163,118 @@ def _target(args: dict[str, Any]) -> dict[str, Any]:
             "image": image,
         }
     raise Rejected("invalid target mode")
+
+
+def guard_host(host: str) -> str | None:
+    """Resolve an external database host and refuse addresses on this server
+    or link-local ones (cloud metadata): the agent must not become a way to
+    probe them. Returns the address to pin (None for a literal IP)."""
+    name = host.strip("[]").lower().rstrip(".")
+    if name in BLOCKED_NAMES or name.endswith(".localhost"):
+        raise Rejected(f"{host} points at this server; use a managed database instead")
+    try:
+        literal = ipaddress.ip_address(name)
+    except ValueError:
+        literal = None
+    if literal is not None:
+        addresses = [literal]
+    else:
+        try:
+            infos = socket.getaddrinfo(name, None, proto=socket.IPPROTO_TCP)
+        except (socket.gaierror, UnicodeError):
+            raise Rejected(f"{host} doesn't resolve from this server") from None
+        addresses = [ipaddress.ip_address(info[4][0].split("%")[0]) for info in infos]
+    for address in addresses:
+        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+            address = address.ipv4_mapped
+        if (
+            address.is_loopback
+            or address.is_link_local
+            or address.is_unspecified
+            or address.is_multicast
+            or address.is_reserved
+        ):
+            raise Rejected(
+                f"{host} resolves to {address}, which isn't allowed for external "
+                "databases (it reaches this server or cloud metadata). Use a "
+                "managed database, or the database's own address."
+            )
+    return None if literal is not None else str(addresses[0])
+
+
+def external_options(
+    target: dict[str, Any], workdir: str
+) -> tuple[list[str], dict[str, str], list[str]]:
+    """Docker args, environment and client flags for an external target:
+    the pinned address and TLS settings."""
+    engine, tls = target["engine"], target["tls"]
+    docker: list[str] = []
+    if target.get("address"):
+        # Resolve the name to the vetted address (no DNS rebinding), while
+        # TLS still checks the certificate against the name.
+        docker += ["--add-host", f"{target['host']}:{target['address']}"]
+    ca = SYSTEM_CA[engine]
+    if target.get("ca"):
+        path = os.path.join(workdir, "ca.pem")
+        with open(path, "w") as handle:
+            handle.write(target["ca"])
+        os.chmod(path, 0o644)
+        docker += ["-v", f"{path}:{CA_PATH}:ro"]
+        ca = CA_PATH
+    env: dict[str, str] = {}
+    flags: list[str] = []
+    if engine == "postgres":
+        env["PGSSLMODE"] = {
+            "disable": "disable",
+            "prefer": "prefer",
+            "require": "require",
+            "verify": "verify-full",
+        }[tls]
+        if tls == "verify":
+            env["PGSSLROOTCERT"] = ca
+    elif engine == "mysql":
+        flags.append(
+            "--ssl-mode="
+            + {
+                "disable": "DISABLED",
+                "prefer": "PREFERRED",
+                "require": "REQUIRED",
+                "verify": "VERIFY_IDENTITY",
+            }[tls]
+        )
+        if tls == "verify":
+            flags.append(f"--ssl-ca={ca}")
+    elif engine == "mariadb":
+        if tls == "disable":
+            flags.append("--skip-ssl")
+        elif tls == "require":
+            flags += ["--ssl", "--disable-ssl-verify-server-cert"]
+        elif tls == "verify":
+            flags += ["--ssl", "--ssl-verify-server-cert", f"--ssl-ca={ca}"]
+    elif tls == "require":
+        flags += ["--tls", "--insecure"]
+    elif tls == "verify":
+        flags += ["--tls", "--cacert", ca]
+    return docker, env, flags
+
+
+def tempdir() -> str:
+    """A private folder for client files. Not under /tmp: the helper runs
+    with PrivateTmp, and Docker bind mounts resolve on the host."""
+    base = os.path.join(DATA_DIR, ".tmp")
+    os.makedirs(base, mode=0o700, exist_ok=True)
+    return tempfile.mkdtemp(prefix="vpdb-", dir=base)
+
+
+def cleanup(env_file: str | None) -> None:
+    """Remove a client's temporary env file (and its folder)."""
+    if not env_file:
+        return
+    folder = os.path.dirname(env_file)
+    if os.path.basename(folder).startswith("vpdb-"):
+        shutil.rmtree(folder, ignore_errors=True)
+    elif os.path.exists(env_file):
+        os.unlink(env_file)
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +365,9 @@ def _client(
 
     # External: a throwaway client container on the host network. Secrets go
     # through a root-only env file, never the command line.
+    workdir = tempdir()
+    docker_args, tls_env, flags = external_options(target, workdir)
+    env.update(tls_env)
     secret_env = {}
     if engine == "postgres":
         secret_env["PGPASSWORD"] = target["password"] or ""
@@ -248,6 +394,7 @@ def _client(
         client = "mysql" if engine == "mysql" else "mariadb"
         cmd = [
             client,
+            *flags,
             "-h",
             target["host"],
             "-P",
@@ -262,8 +409,17 @@ def _client(
     else:
         if target["password"]:
             secret_env["REDISCLI_AUTH"] = target["password"]
-        cmd = ["redis-cli", "-h", target["host"], "-p", str(target["port"]), "--json"]
-    fd, env_file = tempfile.mkstemp(prefix="vpdb-env-")
+        cmd = [
+            "redis-cli",
+            *flags,
+            "-h",
+            target["host"],
+            "-p",
+            str(target["port"]),
+            "--json",
+        ]
+    env_file = os.path.join(workdir, "env")
+    fd = os.open(env_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as handle:
         for key, value in {**secret_env, **env}.items():
             handle.write(f"{key}={value}\n")
@@ -276,6 +432,7 @@ def _client(
         "host",
         "--env-file",
         env_file,
+        *docker_args,
         target["image"],
         *cmd,
     ], env_file
@@ -402,7 +559,7 @@ def _run_sql(
         )
     finally:
         if env_file:
-            os.unlink(env_file)
+            cleanup(env_file)
     duration = int((time.monotonic() - started) * 1000)
     if code != 0:
         raise DbError(_clean_error(stderr) if code != 124 else stderr)
@@ -848,7 +1005,7 @@ def _redis(target: dict[str, Any], *command: str, timeout: int = 15) -> Any:
         code, out, err = _run([*cmd, *command], timeout)
     finally:
         if env_file:
-            os.unlink(env_file)
+            cleanup(env_file)
     if code != 0:
         raise DbError(_clean_error(err or out))
     text = out.strip()
@@ -863,12 +1020,98 @@ def _redis(target: dict[str, Any], *command: str, timeout: int = 15) -> Any:
     return value
 
 
+# Redis ACL users: what each access level may run. Dangerous commands
+# (FLUSHALL, CONFIG, KEYS, DEBUG, ...) are never allowed.
+REDIS_ACCESS = {
+    "readonly": "-@all +@read +@connection -@dangerous",
+    "readwrite": "-@all +@read +@write +@connection +@transaction +@scripting "
+    "+@pubsub -@dangerous",
+}
+
+
+def _redis_conf(target: dict[str, Any]) -> str | None:
+    """The managed instance's config file, where ACL users are kept."""
+    if target["mode"] != "managed":
+        return None
+    path = os.path.join(DATA_DIR, target["container"][len(PREFIX) :], "redis.conf")
+    return path if os.path.isfile(path) else None
+
+
+def _save_acl_user(conf: str, user: str, rule: str | None) -> None:
+    """Add, replace or (rule None) remove one `user` line. Written in place:
+    the file is bind-mounted into the container."""
+    with open(conf, "r+") as handle:
+        lines = [
+            line
+            for line in handle.read().splitlines()
+            if not line.startswith(f"user {user} ")
+        ]
+        if rule:
+            lines.append(f"user {user} {rule}")
+        handle.seek(0)
+        handle.write("\n".join(lines) + "\n")
+        handle.truncate()
+
+
+def _acl_users(target: dict[str, Any]) -> list[dict[str, Any]]:
+    users = []
+    for line in _redis(target, "ACL", "LIST") or []:
+        parts = str(line).split()
+        if len(parts) < 3 or parts[0] != "user":
+            continue
+        rules = [p for p in parts[2:] if not p.startswith(("#", ">", "<", "!"))]
+        users.append(
+            {
+                "name": parts[1],
+                "enabled": "on" in rules,
+                "keys": [r[1:] for r in rules if r.startswith("~")],
+                "rules": " ".join(r for r in rules if r not in ("on", "off"))[:500],
+            }
+        )
+    return users
+
+
 def redis(args: dict[str, Any]) -> dict[str, Any]:
-    """Redis: info, scan (never KEYS), type-aware reads, delete one key."""
+    """Redis: info, scan (never KEYS), type-aware reads, delete one key,
+    and ACL users (hashed passwords, persisted for managed instances)."""
     target = _target(args)
     if target["engine"] != "redis":
         raise Rejected("not a Redis database")
     action = args.get("action")
+    if action in ("acl_setuser", "acl_deluser"):
+        user = _match(IDENT_RE, args.get("user"), "user")
+        if user == "default":
+            raise Rejected("the default user is managed by VPSPilot")
+
+    def acl() -> Any:
+        conf = _redis_conf(target)
+        if action == "acl_list":
+            return {"users": _acl_users(target), "persisted": conf is not None}
+        if action == "acl_deluser":
+            _redis(target, "ACL", "DELUSER", user)
+            if conf:
+                _save_acl_user(conf, user, None)
+            return {"deleted": user}
+        access = args.get("access", "readwrite")
+        if access not in REDIS_ACCESS:
+            raise Rejected("invalid access")
+        pattern = _match(REDIS_PATTERN_RE, args.get("pattern") or "*", "key pattern")
+        if " " in pattern:
+            raise Rejected("invalid key pattern")
+        password = (args.get("secrets") or {}).get("new_password")
+        _match(PASSWORD_RE, password, "new password")
+        # Only the hash ever appears in a command line or file.
+        digest = hashlib.sha256(password.encode()).hexdigest()
+        rule = f"on #{digest} ~{pattern} &* {REDIS_ACCESS[access]}"
+        _redis(target, "ACL", "SETUSER", user, "reset", *rule.split())
+        if conf:
+            _save_acl_user(conf, user, rule)
+        return {"user": user, "persisted": conf is not None}
+
+    if action and action.startswith("acl_"):
+        if action not in ("acl_list", "acl_setuser", "acl_deluser"):
+            raise Rejected("invalid action")
+        return _respond(acl)
 
     def run() -> Any:
         if action == "info":

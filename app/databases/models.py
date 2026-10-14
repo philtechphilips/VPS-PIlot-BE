@@ -1,6 +1,17 @@
 from datetime import datetime
 
-from sqlalchemy import TIMESTAMP, ForeignKey, String, Text, func, true
+from sqlalchemy import (
+    TIMESTAMP,
+    BigInteger,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    func,
+    true,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -30,6 +41,13 @@ class DatabaseInstance(Base):
     status: Mapped[str] = mapped_column(String(16))
     error: Mapped[str | None] = mapped_column(String(500))
     server_version: Mapped[str | None] = mapped_column(String(200))
+    # External only: disable | require | verify (None: the client default,
+    # for databases registered before TLS settings existed) and a CA to
+    # verify against (PEM; the system CAs when empty).
+    tls_mode: Mapped[str | None] = mapped_column(String(16))
+    tls_ca: Mapped[str | None] = mapped_column(Text)
+    # When metrics were last sampled (see sample_due).
+    sampled_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     created_by: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now()
@@ -81,3 +99,26 @@ class DatabaseQuery(Base):
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now()
     )
+
+
+class DatabaseMetric(Base):
+    """A periodic sample of a database's load (see service.sample_due)."""
+
+    __tablename__ = "database_metrics"
+    __table_args__ = (
+        Index("database_metrics_instance_id_ts_idx", "instance_id", "ts"),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True
+    )
+    instance_id: Mapped[str] = mapped_column(
+        ForeignKey("database_instances.id", ondelete="CASCADE")
+    )
+    ts: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    connections: Mapped[int | None]
+    max_connections: Mapped[int | None]
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger)  # SQL: on disk
+    memory_bytes: Mapped[int | None] = mapped_column(BigInteger)  # Redis: used
+    keys: Mapped[int | None] = mapped_column(BigInteger)  # Redis
+    ops_per_sec: Mapped[float | None] = mapped_column(Float)  # Redis

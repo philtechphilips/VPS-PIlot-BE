@@ -296,7 +296,7 @@ def test_external_connection_check(client, admin_headers, db: Session):
             "name": "legacy",
             "server_id": server_id,
             "engine": "mysql",
-            "host": "127.0.0.1",
+            "host": "10.0.0.5",
             "user": "root",
             "password": "hunter2",
             "database": "shop",
@@ -313,11 +313,13 @@ def test_external_connection_check(client, admin_headers, db: Session):
     assert job["type"] == "db.explore" and job["payload"]["target"] == {
         "mode": "external",
         "engine": "mysql",
-        "host": "127.0.0.1",
+        "host": "10.0.0.5",
         "port": 3306,
         "user": "root",
         "name": None,
+        "tls": "verify",
     }
+    assert instance["tls_mode"] == "verify" and instance["has_ca"] is False
     assert secrets_for(client, agent, job["id"])["password"] == "hunter2"
     finish(
         client, agent, job["id"], output={"columns": ["version"], "rows": [["8.0.36"]]}

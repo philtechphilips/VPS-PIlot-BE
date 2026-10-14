@@ -1,6 +1,7 @@
 import os
 import re
 import secrets
+import tempfile
 
 # Settings are read at import time, so set them before importing the app.
 # Real env vars take priority over .env, so tests never use your secrets
@@ -19,6 +20,7 @@ os.environ.update(
     PUBLIC_API_URL="",
     # Tests call monitoring.service.evaluate() directly.
     ALERTS_EVALUATE_SECONDS="0",
+    ARTIFACTS_DIR=tempfile.mkdtemp(prefix="vpspilot-test-artifacts-"),
 )
 
 from dataclasses import dataclass  # noqa: E402
