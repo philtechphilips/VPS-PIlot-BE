@@ -76,6 +76,7 @@ def test_create_queues_a_deploy_without_secrets_in_the_job(
         "type": "git",
         "url": "https://github.com/acme/shop",
         "ref": "main",
+        "auth": False,
     }
     # ...and the stored value is encrypted.
     stored = db.query(Application).one()

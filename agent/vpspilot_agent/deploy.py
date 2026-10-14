@@ -12,6 +12,7 @@ argument lists; nothing goes through a shell.
 
 from __future__ import annotations
 
+import base64
 import os
 import re
 import shutil
@@ -41,6 +42,7 @@ CPUS_RE = re.compile(r"^\d{1,2}(\.\d{1,2})?$")
 MEMORY_RE = re.compile(r"^\d{1,6}[kmg]$")
 ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 MAX_COMMAND = 500
+GIT_TOKEN_RE = re.compile(r"^[A-Za-z0-9_]{20,255}$")
 
 GIT_TIMEOUT = 300
 BUILD_TIMEOUT = 20 * 60
@@ -124,6 +126,13 @@ def validate(args: dict[str, Any]) -> dict[str, Any]:
         ):
             raise Rejected(f"invalid {name.replace('_', ' ')}")
         commands[name] = value.strip() if value else None
+    git_token = args.get("git_token")
+    if git_token is not None and (
+        clean_source["type"] != "git"
+        or not isinstance(git_token, str)
+        or not GIT_TOKEN_RE.match(git_token)
+    ):
+        raise Rejected("invalid git token")
     secret_keys = args.get("secret_keys") or []
     if not isinstance(secret_keys, list) or not all(k in env for k in secret_keys):
         raise Rejected("invalid secret keys")
@@ -147,6 +156,7 @@ def validate(args: dict[str, Any]) -> dict[str, Any]:
         "env": dict(env),
         "secret_keys": list(secret_keys),
         **commands,
+        "git_token": git_token,
     }
 
 
@@ -376,6 +386,22 @@ def _fetch(spec: dict[str, Any], workdir: str, emit: Emit) -> tuple[str, str]:
     source = spec["source"]
     src = os.path.join(workdir, "src")
     env = _git_env()
+    if spec["git_token"]:
+        # Private repo: pass the short-lived token as an HTTP header through
+        # git's environment config, so it is never written to .git/config,
+        # the remote URL, or the process list (root-only /proc/<pid>/environ).
+        basic = base64.b64encode(
+            f"x-access-token:{spec['git_token']}".encode()
+        ).decode()
+        host = re.match(r"^https://[^/]+/", source["url"])
+        scope = host.group(0) if host else source["url"]
+        env.update(
+            {
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": f"http.{scope}.extraheader",
+                "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {basic}",
+            }
+        )
     if not os.path.isdir(os.path.join(src, ".git")):
         shutil.rmtree(src, ignore_errors=True)
         os.makedirs(src, mode=0o700)
@@ -496,7 +522,10 @@ def deploy(args: dict[str, Any], emit: Emit) -> dict[str, Any]:
     """Run one deployment. Returns {"exit_code", "output", "result"}."""
     spec = validate(args)
     # Mask secret values wherever output is shown; plain values stay readable.
-    redact = Redactor([spec["env"][k] for k in spec["secret_keys"]])
+    redact = Redactor(
+        [spec["env"][k] for k in spec["secret_keys"]]
+        + ([spec["git_token"]] if spec["git_token"] else [])
+    )
 
     def say(level: str, message: str) -> None:
         emit(level, redact(message))

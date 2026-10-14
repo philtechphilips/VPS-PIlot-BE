@@ -97,6 +97,8 @@ class GitSource(Strict):
     type: Literal["git"]
     url: GitUrl
     ref: GitRef
+    # Private GitHub repo: the agent fetches a short-lived token with the env.
+    auth: bool = False
 
 
 class ImageSource(Strict):

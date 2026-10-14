@@ -57,6 +57,8 @@ def _app_out(db, app: Application) -> AppOut:
         runtime=app.runtime,
         source_type=app.source_type,  # type: ignore[arg-type]
         repo_url=app.repo_url,
+        github_repo=app.github_repo_full_name,
+        auto_deploy=app.auto_deploy and app.github_repo_id is not None,
         branch=app.branch,
         image=app.image,
         dockerfile=app.dockerfile,

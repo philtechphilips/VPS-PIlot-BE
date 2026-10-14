@@ -151,6 +151,8 @@ def _run_streaming(
             secrets = client.get(f"{base}/secrets")
             args["env"] = secrets.get("env") or {}
             args["secret_keys"] = secrets.get("secret_keys") or []
+            if secrets.get("git_token"):
+                args["git_token"] = secrets["git_token"]
         except ApiError as error:
             if isinstance(error, NotEnrolled):
                 raise

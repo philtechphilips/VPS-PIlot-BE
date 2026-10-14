@@ -54,6 +54,17 @@ class Settings(BaseSettings):
     # Used to build links in emails, e.g. the password reset link
     frontend_url: str = "http://localhost:3000"
 
+    # Public https URL of this API, used for GitHub webhooks (push to deploy).
+    # Falls back to AGENT_API_URL when that is https (e.g. an ngrok tunnel).
+    public_api_url: str = ""
+
+    @property
+    def webhook_base_url(self) -> str | None:
+        for url in (self.public_api_url, self.agent_api_url):
+            if url.startswith("https://"):
+                return url.rstrip("/")
+        return None
+
     # JSON list in .env, e.g. CORS_ORIGINS=["http://localhost:3000"]
     cors_origins: list[str] = ["http://localhost:3000"]
 

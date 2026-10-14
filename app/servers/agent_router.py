@@ -157,7 +157,13 @@ def job_secrets(job_id: str, agent: Agent, db: DbSession):
     if app is None or app.server_id != agent.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No secrets for this job")
     # secret_keys tells the agent which values to mask in build output.
-    return {"env": apps.env_values(app), "secret_keys": apps.secret_keys(app)}
+    reply = {"env": apps.env_values(app), "secret_keys": apps.secret_keys(app)}
+    source = job.payload.get("source") or {}
+    if source.get("type") == "git" and source.get("auth"):
+        token = apps.git_token(db, app)
+        if token:
+            reply["git_token"] = token
+    return reply
 
 
 @router.post("/v1/jobs/{job_id}/events", status_code=status.HTTP_202_ACCEPTED)

@@ -26,8 +26,11 @@ class EnvItem(BaseModel):
 
 class GitSourceIn(BaseModel):
     type: Literal["git"]
-    url: GitUrl
+    url: GitUrl | None = None
     branch: GitRef = "main"
+    # A repository picked from the connected GitHub App (url then optional).
+    installation_id: Annotated[int, Field(gt=0)] | None = None
+    repo_id: Annotated[int, Field(gt=0)] | None = None
 
 
 class ImageSourceIn(BaseModel):
@@ -53,6 +56,8 @@ class AppCreate(BaseModel):
     memory_limit: Memory | None = None
     env: Annotated[list[EnvItem], Field(max_length=100)] = []
     deploy: bool = True
+    # Deploy on every push to the branch (GitHub-linked apps only).
+    auto_deploy: bool = True
 
 
 class AppUpdate(BaseModel):
@@ -68,6 +73,7 @@ class AppUpdate(BaseModel):
     cpu_limit: Cpus | None = None
     memory_limit: Memory | None = None
     env: Annotated[list[EnvItem], Field(max_length=100)] | None = None
+    auto_deploy: bool | None = None
 
 
 class DeployRequest(BaseModel):
@@ -117,6 +123,8 @@ class AppOut(BaseModel):
     runtime: str
     source_type: Literal["git", "image"]
     repo_url: str | None
+    github_repo: str | None
+    auto_deploy: bool
     branch: str | None
     image: str | None
     dockerfile: str

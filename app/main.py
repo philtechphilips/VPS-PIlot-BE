@@ -7,6 +7,7 @@ from app.apps.router import router as apps_router
 from app.audit.router import router as audit_router
 from app.auth.router import router as auth_router
 from app.core.config import settings
+from app.github.router import router as github_router
 from app.jobs.router import router as jobs_router
 from app.servers.agent_router import router as agent_router
 from app.servers.router import router as servers_router
@@ -38,6 +39,7 @@ app.include_router(agent_router)
 app.include_router(jobs_router)
 app.include_router(audit_router)
 app.include_router(apps_router)
+app.include_router(github_router)
 
 
 @app.get("/")

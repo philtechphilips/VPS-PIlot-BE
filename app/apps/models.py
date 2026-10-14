@@ -1,7 +1,17 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, TIMESTAMP, ForeignKey, Index, String, Text, func
+from sqlalchemy import (
+    JSON,
+    TIMESTAMP,
+    BigInteger,
+    Boolean,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -30,6 +40,12 @@ class Application(Base):
     # Only used when the repository has no Dockerfile (detected builds).
     build_command: Mapped[str | None] = mapped_column(String(500))
     start_command: Mapped[str | None] = mapped_column(String(500))
+    # Linked GitHub repository (via the GitHub App), for private clones and
+    # deploy-on-push.
+    github_installation_id: Mapped[int | None] = mapped_column(BigInteger)
+    github_repo_id: Mapped[int | None] = mapped_column(BigInteger, index=True)
+    github_repo_full_name: Mapped[str | None] = mapped_column(String(200))
+    auto_deploy: Mapped[bool] = mapped_column(Boolean, server_default="false")
 
     container_port: Mapped[int]
     host_port: Mapped[int]

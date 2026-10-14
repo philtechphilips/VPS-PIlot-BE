@@ -8,6 +8,7 @@ from sqlalchemy import create_engine, pool
 import app.apps.models  # noqa: F401
 import app.audit.models  # noqa: F401
 import app.auth.models  # noqa: F401
+import app.github.models  # noqa: F401
 import app.jobs.models  # noqa: F401
 import app.servers.models  # noqa: F401
 import app.users.models  # noqa: F401
