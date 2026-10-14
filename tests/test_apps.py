@@ -444,3 +444,19 @@ def test_docker_errors_are_readable():
         deploy._docker_error("docker: Error response from daemon: No such image: x.\n")
         == "No such image: x."
     )
+
+
+def test_deployments_are_paginated(client, admin_headers):
+    server_id, _ = enrolled_agent(client, admin_headers)
+    app = client.post(APPS, json=git_app(server_id), headers=admin_headers).json()
+    for _ in range(4):
+        client.post(f"{APPS}/{app['id']}/deployments", json={}, headers=admin_headers)
+    first = client.get("/api/v1/deployments?limit=2", headers=admin_headers).json()
+    second = client.get(
+        f"/api/v1/deployments?limit=2&before={first[-1]['id']}", headers=admin_headers
+    ).json()
+    third = client.get(
+        f"/api/v1/deployments?limit=2&before={second[-1]['id']}", headers=admin_headers
+    ).json()
+    ids = [d["id"] for d in first + second + third]
+    assert len(ids) == 5 and len(set(ids)) == 5

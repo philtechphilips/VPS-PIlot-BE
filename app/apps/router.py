@@ -213,9 +213,16 @@ def app_deployments(
 
 @router.get("/deployments", response_model=list[DeploymentOut])
 def all_deployments(
-    db: DbSession, _: AdminUser, limit: Annotated[int, Query(ge=1, le=100)] = 50
+    db: DbSession,
+    _: AdminUser,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    before: Annotated[str, Query(max_length=32)] | None = None,
+    app_id: Annotated[str, Query(max_length=32)] | None = None,
 ):
-    return [_deployment_out(db, d) for d in service.list_deployments(db, None, limit)]
+    return [
+        _deployment_out(db, d)
+        for d in service.list_deployments(db, app_id, limit, before)
+    ]
 
 
 @router.get("/deployments/{deployment_id}", response_model=DeploymentDetail)

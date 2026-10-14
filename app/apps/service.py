@@ -7,7 +7,7 @@ import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.orm import Session
 
 from app.apps.models import Application, Deployment
@@ -525,8 +525,13 @@ def rollback(
 
 
 def list_deployments(
-    db: Session, app_id: str | None = None, limit: int = 30
+    db: Session,
+    app_id: str | None = None,
+    limit: int = 30,
+    before: str | None = None,
 ) -> list[Deployment]:
+    """Newest first. `before` is the last deployment id of the previous
+    page (keyset pagination: stable while new deployments arrive)."""
     jobs.reap(db)
     query = (
         select(Deployment)
@@ -535,6 +540,18 @@ def list_deployments(
     )
     if app_id:
         query = query.where(Deployment.application_id == app_id)
+    if before:
+        cursor = db.get(Deployment, before)
+        if cursor is not None:
+            query = query.where(
+                or_(
+                    Deployment.created_at < cursor.created_at,
+                    and_(
+                        Deployment.created_at == cursor.created_at,
+                        Deployment.id > cursor.id,
+                    ),
+                )
+            )
     return list(db.scalars(query))
 
 
