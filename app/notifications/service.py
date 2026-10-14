@@ -155,6 +155,21 @@ def deployment_finished(db: Session, deployment, app, server) -> None:
         ),
         "url": f"{settings.frontend_url.rstrip('/')}{link}",
     }
+    from app.notifications import channels
+
+    channels.dispatch(
+        db,
+        "deployment.succeeded" if ok else "deployment.failed",
+        {
+            "title": title,
+            "detail": body,
+            "app": app.name,
+            "server": data["server"],
+            "commit_sha": deployment.commit_sha,
+            "deployment_id": deployment.id,
+            "url": data["url"],
+        },
+    )
     for user in users:
         prefs = get_settings(db, user.id)
         if (ok and prefs.email_deploy_success) or (
@@ -230,6 +245,19 @@ def alert_changed(
         title if firing else f"Resolved: {title}",
         detail,
         "/dashboard/monitoring",
+    )
+    from app.notifications import channels
+
+    channels.dispatch(
+        db,
+        "alert.firing" if firing else "alert.resolved",
+        {
+            "title": title if firing else f"Resolved: {title}",
+            "detail": detail,
+            "severity": severity,
+            "started_at": started_at,
+            "url": f"{settings.frontend_url.rstrip('/')}/dashboard/monitoring",
+        },
     )
     if not email:
         return

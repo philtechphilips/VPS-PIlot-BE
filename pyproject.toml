@@ -81,6 +81,8 @@ ignore = ["UP047"]
 "agent/vpspilot_agent/transfers.py" = ["UP017", "E501"]
 "tests/test_buildpacks.py" = ["E501"]
 "tests/test_database_extras.py" = ["E501"]
+"tests/test_alert_channels.py" = ["E501"]
+"app/notifications/channels.py" = ["E501"]
 
 [tool.ruff.lint.flake8-bugbear]
 # FastAPI's Depends()/Query() in defaults is idiomatic

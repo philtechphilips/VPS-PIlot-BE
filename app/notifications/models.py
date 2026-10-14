@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import TIMESTAMP, ForeignKey, Index, String, func, true
+from sqlalchemy import JSON, TIMESTAMP, ForeignKey, Index, String, Text, func, true
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -38,3 +38,26 @@ class NotificationSettings(Base):
     email_deploy_success: Mapped[bool] = mapped_column(server_default=true())
     email_deploy_failure: Mapped[bool] = mapped_column(server_default=true())
     email_alerts: Mapped[bool] = mapped_column(server_default=true())
+
+
+class AlertChannel(Base):
+    """Somewhere alerts and deployment results are also sent: a webhook,
+    a Slack (or Slack-compatible) incoming webhook, or a Telegram chat."""
+
+    __tablename__ = "alert_channels"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16))  # webhook | slack | telegram
+    name: Mapped[str] = mapped_column(String(60))
+    # Encrypted JSON: url (+ signing secret) or bot token + chat id.
+    config: Mapped[str] = mapped_column(Text)
+    # Shown in lists instead of the config, e.g. "hooks.slack.com" or "chat 12345".
+    target_label: Mapped[str] = mapped_column(String(120))
+    events: Mapped[list[str]] = mapped_column(JSON, default=list)
+    enabled: Mapped[bool] = mapped_column(server_default=true())
+    created_by: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now()
+    )
+    last_sent_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(String(300))
