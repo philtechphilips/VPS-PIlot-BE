@@ -119,12 +119,18 @@ def import_(args: dict[str, Any], emit: dbs.Emit) -> dict[str, Any]:
         raise Rejected("invalid format")
     fd = _open_upload(args.get("path"))
     if engine == "postgres":
+        # Create objects as the database's owner (e.g. an app's own login),
+        # not the admin running the import, so the app can use its tables.
+        role = _owner_role(target, database)
         tool = (
             ["pg_restore", "--no-owner", "--no-privileges", "--exit-on-error",
-             "--single-transaction"]
+             "--single-transaction", *([f"--role={role}"] if role else [])]
             if fmt == "pgdump"
-            else ["psql", "-X", "-q", "-v", "ON_ERROR_STOP=1", "--single-transaction"]
+            else ["psql", "-X", "-q", "-v", "ON_ERROR_STOP=1", "--single-transaction",
+                  *(["-c", f"SET ROLE {dbs._ident(engine, role)}"] if role else []), "-f", "-"]
         )  # fmt: skip
+        if role:
+            emit("info", f"Objects will belong to {role}, the owner of {database}")
     else:
         tool = ["mysql" if engine == "mysql" else "mariadb"]
     cmd, env_file = backups._client_cmd(target, tool, database, True)
@@ -166,6 +172,24 @@ def import_(args: dict[str, Any], emit: dbs.Emit) -> dict[str, Any]:
     if tables is not None:
         emit("info", f"{database} now has {tables} table{'s' if tables != 1 else ''}")
     return {"exit_code": 0, "output": "", "result": {"tables": tables}}
+
+
+def _owner_role(target: dict[str, Any], database: str) -> str | None:
+    """The database's owner when it isn't the connecting user and that
+    user may act as it; None to import as the connecting user."""
+    sql = (
+        "SELECT pg_get_userbyid(d.datdba), pg_get_userbyid(d.datdba) <> current_user "
+        "AND pg_has_role(current_user, d.datdba, 'MEMBER') FROM pg_database d "
+        f"WHERE d.datname = {dbs._quote_literal(database)}"
+    )
+    try:
+        rows = dbs._run_sql(target, sql, None, True, 1, 30)["rows"]
+    except (dbs.DbError, KeyError):
+        return None
+    if not rows or str(rows[0][1]).lower() not in ("t", "true"):
+        return None
+    owner = rows[0][0]
+    return owner if isinstance(owner, str) and dbs.IDENT_RE.fullmatch(owner) else None
 
 
 OPERATIONS = {"transfer.cleanup": cleanup}
