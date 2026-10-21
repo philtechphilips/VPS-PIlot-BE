@@ -297,3 +297,124 @@ def test_proxy_routes_host_upstreams_to_the_gateway():
         proxy._sites(
             {"sites": [{"host": "a.example.com", "tls": "auto", "upstream": "evil:1"}]}
         )
+
+
+# ---------------------------------------------------------------------------
+# Security releases reach apps on their next deploy
+# ---------------------------------------------------------------------------
+
+
+def _build_spec() -> dict:
+    return {
+        "app": "shop",
+        "deployment_id": "a" * 32,
+        "context": ".",
+        "dockerfile": "Dockerfile",
+        "env": {},
+        "secret_keys": [],
+        "build_command": "",
+        "start_command": "",
+    }
+
+
+def _fake_builds(monkeypatch, results):
+    calls = []
+
+    def fake_stream(cmd, emit, timeout, env=None):
+        calls.append(cmd)
+        return results[len(calls) - 1]
+
+    monkeypatch.setattr(deploy, "_stream", fake_stream)
+    monkeypatch.setattr(deploy, "_dangling", lambda: set())
+    monkeypatch.setattr(deploy, "_builder_env", lambda: {})
+    return calls
+
+
+def test_docker_builds_pull_the_newest_base_image(monkeypatch, tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "Dockerfile").write_text("FROM node:22-bookworm-slim\n")
+    events = []
+    emit = lambda kind, text: events.append((kind, text))  # noqa: E731
+
+    calls = _fake_builds(monkeypatch, [(0, [])])
+    deploy._build(_build_spec(), str(tmp_path), "f" * 40, emit)
+    assert "--pull" in calls[0]
+
+    # Rate limited or offline: fall back to the cached base image.
+    limited = "failed to resolve source metadata for node:22: toomanyrequests"
+    calls = _fake_builds(monkeypatch, [(1, [limited]), (0, [])])
+    deploy._build(_build_spec(), str(tmp_path), "f" * 40, emit)
+    assert "--pull" in calls[0] and "--pull" not in calls[1]
+    assert any(kind == "warn" and "cached" in text for kind, text in events)
+
+    # A real build failure isn't retried.
+    calls = _fake_builds(monkeypatch, [(1, ["npm ERR! missing script: build"])])
+    with pytest.raises(deploy.Failed):
+        deploy._build(_build_spec(), str(tmp_path), "f" * 40, emit)
+    assert len(calls) == 1
+
+
+def _node_tarball(version: str) -> bytes:
+    import io
+    import tarfile
+
+    out = io.BytesIO()
+    with tarfile.open(fileobj=out, mode="w:gz") as tar:
+        for name in ("node", "npm"):
+            data = f"v{version}".encode()
+            info = tarfile.TarInfo(f"node-v{version}-linux-x64/bin/{name}")
+            info.size, info.mode = len(data), 0o755
+            tar.addfile(info, io.BytesIO(data))
+    return out.getvalue()
+
+
+def test_native_apps_get_the_newest_node_of_their_major(monkeypatch, tmp_path):
+    import hashlib
+    import io
+
+    latest = "22.23.4"
+    tarball = _node_tarball(latest)
+    sums = f"{hashlib.sha256(tarball).hexdigest()}  node-v{latest}-linux-x64.tar.gz\n"
+    fetched = []
+
+    def fake_urlopen(url, timeout=None):
+        fetched.append(url)
+        if url.endswith("SHASUMS256.txt"):
+            return io.BytesIO(sums.encode())
+        return io.BytesIO(tarball)
+
+    def fake_run(cmd, timeout=60, **kwargs):  # `node --version` reads our stub
+        try:
+            return 0, open(cmd[0]).read()
+        except OSError:
+            return 127, ""
+
+    runtimes = tmp_path / "runtimes"
+    old = runtimes / "node-22" / "bin"
+    old.mkdir(parents=True)
+    (old / "node").write_text("v22.20.0")
+    monkeypatch.setattr(native, "RUNTIMES", str(runtimes))
+    monkeypatch.setattr(native, "SYSTEM_PATH", str(tmp_path / "empty"))
+    monkeypatch.setattr(native.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(native.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(native.d, "_run", fake_run)
+    events = []
+    emit = lambda kind, text: events.append((kind, text))  # noqa: E731
+
+    # An outdated cached build is replaced by the newest release.
+    assert native._node_bin("22", emit) == str(old)
+    assert (old / "node").read_text() == f"v{latest}"
+    assert any(url.endswith(".tar.gz") for url in fetched)
+
+    # Already current: nothing is downloaded.
+    fetched.clear()
+    native._node_bin("22", emit)
+    assert not any(url.endswith(".tar.gz") for url in fetched)
+
+    # nodejs.org unreachable: deploy with what is installed, and say so.
+    def offline(url, timeout=None):
+        raise OSError("no route to host")
+
+    monkeypatch.setattr(native.urllib.request, "urlopen", offline)
+    assert native._node_bin("22", emit) == str(old)
+    assert any(kind == "warn" and "updates" in text for kind, text in events)

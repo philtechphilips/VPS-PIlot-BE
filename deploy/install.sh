@@ -112,7 +112,9 @@ docker network inspect vpspilot >/dev/null 2>&1 || docker network create vpspilo
 
 say "Building and starting the control plane (a few minutes the first time)"
 cd "$ROOT/api/deploy"
-WEB_SOURCE="$ROOT/web" docker compose --env-file .env up -d --build --remove-orphans
+# --pull: re-running the installer also picks up base-image security fixes.
+WEB_SOURCE="$ROOT/web" docker compose --env-file .env build --pull
+WEB_SOURCE="$ROOT/web" docker compose --env-file .env up -d --remove-orphans
 
 say "Waiting for the API"
 for _ in $(seq 1 60); do

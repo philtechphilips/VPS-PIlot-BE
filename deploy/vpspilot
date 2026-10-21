@@ -45,7 +45,10 @@ case "${1:-status}" in
     echo "==> Saving a database backup first"
     "$0" backup >/dev/null
     echo "==> Rebuilding and restarting"
-    compose up -d --build --remove-orphans
+    # --pull: fetch the newest base images, so Node.js and Python security
+    # releases are picked up too.
+    compose build --pull
+    compose up -d --remove-orphans
     install -m 0755 "$DEPLOY/vpspilot" /usr/local/bin/vpspilot
     docker exec vpspilot-proxy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1 || true
     echo "==> Done. Upgrade agents from each server's page (or re-run their install command)."

@@ -540,6 +540,19 @@ def _builder_env() -> dict[str, str]:
     return {"DOCKER_BUILDKIT": "0"}
 
 
+PULL_ERRORS = (
+    "toomanyrequests",  # registry rate limit
+    "pull access denied",  # a base image that only exists locally
+    "failed to resolve source metadata",  # BuildKit couldn't reach the registry
+    "error response from daemon: get",  # the classic builder couldn't
+)
+
+
+def _pull_refused(tail: list[str]) -> bool:
+    text = "\n".join(tail).lower()
+    return any(e in text for e in PULL_ERRORS)
+
+
 def _build(spec: dict[str, Any], workdir: str, sha: str, emit: Emit) -> tuple[str, str]:
     """Build the image; returns (image, how it was built)."""
     src = os.path.join(workdir, "src")
@@ -581,16 +594,19 @@ def _build(spec: dict[str, Any], workdir: str, sha: str, emit: Emit) -> tuple[st
     cmd = ["docker", "build", "--force-rm", "-t", image, "-f", dockerfile]
     for key in build_args:
         cmd += ["--build-arg", key]
-    code, tail = _stream(
-        [*cmd, context],
-        emit,
-        BUILD_TIMEOUT,
-        env={
-            **_git_env(),
-            **_builder_env(),
-            **{k: spec["env"][k] for k in build_args},
-        },
-    )
+    env = {
+        **_git_env(),
+        **_builder_env(),
+        **{k: spec["env"][k] for k in build_args},
+    }
+    # --pull: a cached base image (node:22, python:3.12…) would otherwise
+    # never pick up security releases.
+    code, tail = _stream([*cmd, "--pull", context], emit, BUILD_TIMEOUT, env=env)
+    if code != 0 and _pull_refused(tail):
+        # Registry rate limits, no network, or a base image that only exists
+        # locally: build from what is cached rather than failing.
+        emit("warn", "Couldn't fetch the newest base image; using the cached one")
+        code, tail = _stream([*cmd, context], emit, BUILD_TIMEOUT, env=env)
     if code != 0:
         # The classic builder keeps every finished step as an image; a failed
         # build would leave them behind on every push.

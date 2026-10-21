@@ -149,45 +149,56 @@ def _chown_tree(path: str, uid: int, gid: int) -> None:
             os.lchown(os.path.join(parent, name), uid, gid)
 
 
-def _node_major(binary: str) -> int | None:
+def _node_version(binary: str) -> tuple[int, ...] | None:
     code, out = d._run([binary, "--version"], timeout=15)
-    match = re.match(r"v(\d+)\.", out.strip()) if code == 0 else None
-    return int(match.group(1)) if match else None
+    match = re.match(r"v(\d+)\.(\d+)\.(\d+)", out.strip()) if code == 0 else None
+    return tuple(int(n) for n in match.groups()) if match else None
 
 
 def _node_bin(major: str, emit: d.Emit) -> str:
-    """Directory holding node/npm for the major version the app asks for:
-    the system's if it matches, else an official build from nodejs.org."""
+    """Directory holding node/npm for the major version the app asks for.
+
+    Always the newest release of that major, so security releases reach apps
+    on their next deploy: the system's node if it is current, else an official
+    build from nodejs.org (kept in RUNTIMES and replaced when it falls behind).
+    """
     local = os.path.join(RUNTIMES, f"node-{major}", "bin")
-    if os.path.isfile(os.path.join(local, "node")):
-        return local
+    have_local = os.path.isfile(os.path.join(local, "node"))
     system = shutil.which("node", path=SYSTEM_PATH)
-    if (
-        system
-        and str(_node_major(system)) == major
-        and shutil.which("npm", path=SYSTEM_PATH)
-    ):
-        return os.path.dirname(system)
+    system_version = _node_version(system) if system else None
+    if not (system_version and str(system_version[0]) == major and shutil.which("npm", path=SYSTEM_PATH)):
+        system_version = None
     arch = {"x86_64": "x64", "amd64": "x64", "aarch64": "arm64", "arm64": "arm64"}.get(
         platform.machine().lower()
     )
     if arch is None:
         raise d.Failed(f"No Node.js builds for {platform.machine()}")
-    emit("step", f"Installing Node.js {major} (nodejs.org)")
     base = f"{NODE_DIST}/latest-v{major}.x"
     try:
         with urllib.request.urlopen(f"{base}/SHASUMS256.txt", timeout=30) as resp:
             sums = resp.read(200_000).decode()
     except OSError as error:
+        # Offline: keep deploying with what is here rather than failing.
+        if have_local or system_version:
+            emit("warn", f"Couldn't check nodejs.org for Node.js {major} updates: {error}")
+            return local if have_local else os.path.dirname(system)
         raise d.Failed(f"Couldn't reach nodejs.org: {error}") from None
     match = re.search(
-        rf"^([0-9a-f]{{64}})\s+(node-v{major}\.\d+\.\d+-linux-{arch}\.tar\.gz)$",
+        rf"^([0-9a-f]{{64}})\s+(node-v({major}\.\d+\.\d+)-linux-{arch}\.tar\.gz)$",
         sums,
         re.MULTILINE,
     )
     if not match:
         raise d.Failed(f"Node.js {major} isn't available for linux-{arch}")
-    digest, filename = match.groups()
+    digest, filename, latest_text = match.groups()
+    latest = tuple(int(n) for n in latest_text.split("."))
+    if system_version and system_version >= latest:
+        return os.path.dirname(system)
+    if have_local and _node_version(os.path.join(local, "node")) == latest:
+        return local
+    if system_version:
+        emit("info", f"The server's Node.js {'.'.join(map(str, system_version))} is behind {latest_text}")
+    emit("step", f"Installing Node.js {latest_text} (nodejs.org)")
     os.makedirs(RUNTIMES, mode=0o755, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=RUNTIMES) as tmp:
         archive = os.path.join(tmp, filename)
@@ -201,6 +212,9 @@ def _node_bin(major: str, emit: d.Emit) -> str:
                     sha.update(chunk)
                     out.write(chunk)
         except OSError as error:
+            if have_local:
+                emit("warn", f"Couldn't download Node.js {latest_text} ({error}); using the installed one")
+                return local
             raise d.Failed(f"Couldn't download Node.js: {error}") from None
         if sha.hexdigest() != digest:
             raise d.Failed("The Node.js download didn't match its checksum")
@@ -211,9 +225,12 @@ def _node_bin(major: str, emit: d.Emit) -> str:
                     raise d.Failed("Unexpected file in the Node.js archive")
             tar.extractall(tmp)  # noqa: S202 - checked above
         target = os.path.join(RUNTIMES, f"node-{major}")
-        shutil.rmtree(target, ignore_errors=True)
+        # Move the old tree aside (it goes with the temp dir) and swap the new one in.
+        old = os.path.join(tmp, "previous")
+        if os.path.isdir(target):
+            os.replace(target, old)
         os.replace(os.path.join(tmp, filename[: -len(".tar.gz")]), target)
-    emit("info", f"Node.js {match.group(2).split('-')[1]} installed in {target}")
+    emit("info", f"Node.js {latest_text} installed in {target}")
     return local
 
 
