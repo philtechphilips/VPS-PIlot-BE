@@ -271,10 +271,22 @@ def _run(
     return done.returncode, ((done.stdout or "") + (done.stderr or "")).strip()
 
 
+def _docker_config_dir() -> str:
+    # The helper runs with ProtectHome, so /root is read-only and the docker
+    # CLI (buildx in particular) can't create ~/.docker there.
+    path = os.path.join(APPS_DIR, ".docker")
+    try:
+        os.makedirs(path, mode=0o700, exist_ok=True)
+    except OSError:
+        pass
+    return path
+
+
 def _git_env() -> dict[str, str]:
     return {
         "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         "HOME": "/root",
+        "DOCKER_CONFIG": _docker_config_dir(),
         # Never wait for credentials: private repos fail fast instead.
         "GIT_TERMINAL_PROMPT": "0",
         "GIT_ASKPASS": "/bin/false",

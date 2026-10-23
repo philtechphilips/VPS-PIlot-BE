@@ -418,3 +418,13 @@ def test_native_apps_get_the_newest_node_of_their_major(monkeypatch, tmp_path):
     monkeypatch.setattr(native.urllib.request, "urlopen", offline)
     assert native._node_bin("22", emit) == str(old)
     assert any(kind == "warn" and "updates" in text for kind, text in events)
+
+
+def test_builds_keep_docker_config_out_of_the_protected_home(tmp_path, monkeypatch):
+    monkeypatch.setattr(deploy, "APPS_DIR", str(tmp_path))
+
+    env = deploy._git_env()
+
+    assert env["DOCKER_CONFIG"] == str(tmp_path / ".docker")
+    assert (tmp_path / ".docker").is_dir()
+    assert not env["DOCKER_CONFIG"].startswith("/root")
