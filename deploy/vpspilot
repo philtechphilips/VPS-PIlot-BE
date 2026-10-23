@@ -15,6 +15,12 @@ ROOT="/opt/vpspilot"
 DEPLOY="$ROOT/api/deploy"
 ENV_FILE="$DEPLOY/.env"
 
+# Read one value from .env without running it as shell: values like
+# EMAIL_FROM=Name <addr> are fine for Compose but not for `.`.
+env_value() {
+  sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1 | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/"
+}
+
 compose() { (cd "$DEPLOY" && WEB_SOURCE="$ROOT/web" docker compose --env-file .env "$@"); }
 need_root() { [ "$(id -u)" -eq 0 ] || { echo "Run as root (sudo)." >&2; exit 1; }; }
 
@@ -64,10 +70,8 @@ case "${1:-status}" in
     mkdir -p "$BACKUP_DIR"
     chmod 700 "$BACKUP_DIR"
     stamp=$(date -u +%Y%m%dT%H%M%SZ)
-    set -a
-    # shellcheck source=/dev/null
-    . "$ENV_FILE"
-    set +a
+    DATABASE_USERNAME=$(env_value DATABASE_USERNAME)
+    DATABASE_NAME=$(env_value DATABASE_NAME)
     out="$BACKUP_DIR/vpspilot-$stamp.tar.gz"
     tmp=$(mktemp -d)
     docker exec vpspilot-db pg_dump -U "$DATABASE_USERNAME" -Fc "$DATABASE_NAME" > "$tmp/database.pgdump"
@@ -84,10 +88,8 @@ case "${1:-status}" in
     tmp=$(mktemp -d)
     tar -xzf "$file" -C "$tmp"
     cp "$tmp/env" "$ENV_FILE" && chmod 600 "$ENV_FILE"
-    set -a
-    # shellcheck source=/dev/null
-    . "$ENV_FILE"
-    set +a
+    DATABASE_USERNAME=$(env_value DATABASE_USERNAME)
+    DATABASE_NAME=$(env_value DATABASE_NAME)
     compose up -d db
     sleep 5
     docker exec -i vpspilot-db pg_restore -U "$DATABASE_USERNAME" -d "$DATABASE_NAME" --clean --if-exists --no-owner < "$tmp/database.pgdump"

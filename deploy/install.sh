@@ -97,7 +97,7 @@ CORS_ORIGINS=["https://$DOMAIN"]
 COOKIE_SECURE=true
 AGENT_API_URL=https://$DOMAIN
 PUBLIC_API_URL=https://$DOMAIN
-EMAIL_FROM=VPSPilot <onboarding@resend.dev>
+EMAIL_FROM="VPSPilot <onboarding@resend.dev>"
 RESEND_API_KEY=$RESEND_KEY
 ENV
   umask 022
