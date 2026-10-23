@@ -17,7 +17,7 @@ from app.apps.schemas import (
     LogsRequest,
 )
 from app.audit import service as audit
-from app.auth.dependencies import AdminUser
+from app.auth.dependencies import AdminUser, ReaderUser
 from app.core.database import DbSession
 from app.jobs import service as jobs
 from app.servers.models import Server
@@ -75,6 +75,8 @@ def _app_out(db, app: Application) -> AppOut:
         health_timeout_seconds=app.health_timeout_seconds,
         cpu_limit=app.cpu_limit,
         memory_limit=app.memory_limit,
+        data_path=app.data_path,
+        error_ignore=app.error_ignore or [],
         env=[EnvOut(**e) for e in service.env_for_display(app)],
         current_deployment=_deployment_out(db, current, app) if current else None,
         latest_deployment=_deployment_out(db, latest, app) if latest else None,
@@ -276,7 +278,7 @@ def rollback_deployment(
     status_code=status.HTTP_202_ACCEPTED,
 )
 def request_logs(
-    app_id: str, body: LogsRequest, request: Request, db: DbSession, user: AdminUser
+    app_id: str, body: LogsRequest, request: Request, db: DbSession, user: ReaderUser
 ):
     """Ask the agent for the app's runtime output. Poll the returned job."""
     app = _get_app(db, app_id)

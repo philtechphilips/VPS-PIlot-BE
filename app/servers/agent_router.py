@@ -62,12 +62,15 @@ def current_agent(
 Agent = Annotated[Server, Depends(current_agent)]
 
 
-def _config(jobs_pending: int = 0) -> AgentConfig:
+def _config(
+    jobs_pending: int = 0, error_ignore: dict[str, list[str]] | None = None
+) -> AgentConfig:
     return AgentConfig(
         heartbeat_seconds=settings.agent_heartbeat_seconds,
         metrics_seconds=settings.agent_metrics_seconds,
         server_time=datetime.now(UTC),
         jobs_pending=jobs_pending,
+        error_ignore=error_ignore or {},
     )
 
 
@@ -111,7 +114,9 @@ def enroll(body: EnrollRequest, request: Request, db: DbSession):
 @router.post("/v1/heartbeat", response_model=AgentConfig)
 def heartbeat(body: HeartbeatRequest, agent: Agent, db: DbSession):
     service.heartbeat(db, agent, body.facts.model_dump(exclude_none=True))
-    return _config(jobs.pending_count(db, agent))
+    apps_here = db.scalars(select(Application).where(Application.server_id == agent.id))
+    ignore = {a.name: a.error_ignore for a in apps_here if a.error_ignore}
+    return _config(jobs.pending_count(db, agent), ignore)
 
 
 @router.post("/v1/metrics", status_code=status.HTTP_202_ACCEPTED)

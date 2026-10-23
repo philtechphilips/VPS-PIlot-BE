@@ -58,6 +58,8 @@ class AgentConfig(BaseModel):
     server_time: datetime
     # Queued jobs waiting for this agent; it claims them right away.
     jobs_pending: int = 0
+    # Per app: error lines containing these aren't counted (App logging errors).
+    error_ignore: dict[str, list[str]] = {}
 
 
 Percent = Annotated[float, Field(ge=0, le=100)]
@@ -100,6 +102,22 @@ class ContainerIn(BaseModel):
     ports: Medium = ""
 
 
+class PackageUpdate(BaseModel):
+    name: Annotated[str, StringConstraints(max_length=100)]
+    version: Annotated[str, StringConstraints(max_length=100)]
+    security: bool = False
+
+
+class UpdatesIn(BaseModel):
+    """Pending package updates, from apt's cache (agent 1.1.4+)."""
+
+    total: Annotated[int, Field(ge=0)]
+    security: Annotated[int, Field(ge=0)]
+    packages: Annotated[list[PackageUpdate], Field(max_length=200)] = []
+    reboot_required: bool = False
+    checked_at: Annotated[int, Field(ge=0)]
+
+
 class InventoryRequest(BaseModel):
     services: Annotated[list[ServiceIn], Field(max_length=500)] = []
     containers: Annotated[list[ContainerIn], Field(max_length=200)] = []
@@ -108,6 +126,7 @@ class InventoryRequest(BaseModel):
     listening_ports: Annotated[
         list[Annotated[int, Field(ge=1, le=65535)]], Field(max_length=2000)
     ] = []
+    updates: UpdatesIn | None = None
 
 
 # ---------------------------------------------------------------------------

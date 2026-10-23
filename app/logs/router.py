@@ -14,7 +14,7 @@ from sqlalchemy import delete, select
 
 from app.apps.models import Application
 from app.audit import service as audit
-from app.auth.dependencies import AdminUser
+from app.auth.dependencies import AdminUser, ReaderUser
 from app.core.database import DbSession
 from app.databases.models import DatabaseInstance
 from app.jobs import service as jobs
@@ -84,7 +84,7 @@ def sources(
 
 
 @router.post("", status_code=status.HTTP_202_ACCEPTED)
-def request_logs(body: LogsRequest, request: Request, db: DbSession, user: AdminUser):
+def request_logs(body: LogsRequest, request: Request, db: DbSession, user: ReaderUser):
     server = db.get(Server, body.server_id)
     if server is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Server not found")

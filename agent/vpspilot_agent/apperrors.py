@@ -193,12 +193,30 @@ def _journal_lines(unit: str, since: float, until: float, deadline: float):
         proc.wait()
 
 
+def _ignore(value: Any) -> dict[str, list[str]]:
+    """Per app, lowercased substrings to leave out (plain text, not regex)."""
+    if not isinstance(value, dict):
+        return {}
+    out = {}
+    for app, patterns in list(value.items())[:500]:
+        if not isinstance(app, str) or not isinstance(patterns, list):
+            continue
+        if d.APP_RE.match(app):
+            out[app] = [
+                p.lower()
+                for p in patterns[:20]
+                if isinstance(p, str) and 0 < len(p) <= 200
+            ]
+    return out
+
+
 def scan(args: dict[str, Any]) -> dict[str, Any]:
     """Error lines per app and minute since `since` (a Docker log timestamp).
     Returns {"until": cursor, "rows": [{"app", "minute", "errors", "sample"}]}."""
     since = args.get("since")
     if not isinstance(since, str) or not d.SINCE_RE.fullmatch(since):
         raise Rejected("invalid since")
+    ignore = _ignore(args.get("ignore"))
     # A second back, so lines still being written land in the next read.
     until_epoch = time.time() - 1
     since_epoch = _epoch(since)
@@ -216,6 +234,9 @@ def scan(args: dict[str, Any]) -> dict[str, Any]:
         for epoch, message, priority in lines:
             message = ANSI_RE.sub("", message)
             if not is_error(message, priority):
+                continue
+            lowered = message.lower()
+            if any(p in lowered for p in ignore.get(app, ())):
                 continue
             minute = int(epoch) // 60 * 60
             row = buckets.setdefault(

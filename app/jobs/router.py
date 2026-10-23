@@ -8,6 +8,7 @@ from app.core.database import DbSession
 from app.jobs import service
 from app.jobs.schemas import ActionRequest, JobDetail, JobEventOut, JobOut
 from app.servers import service as servers
+from app.users.models import Role
 
 router = APIRouter(prefix="/api/v1", tags=["Jobs"])
 
@@ -64,11 +65,14 @@ def list_jobs(
 
 
 @router.get("/jobs/{job_id}", response_model=JobDetail)
-def get_job(job_id: str, db: DbSession, _: AdminUser):
+def get_job(job_id: str, db: DbSession, user: AdminUser):
     service.reap(db)
     job = service.get(db, job_id)
     if job is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Job not found")
+    if user.role == Role.VIEWER and job.type.startswith(("db.", "backup.")):
+        # Query results and dumps can hold data a viewer shouldn't see.
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only admins can open this job")
     return JobDetail(
         **JobOut.model_validate(job).model_dump(),
         output=service.job_output(job),

@@ -77,4 +77,29 @@ def require_roles(*roles: Role) -> Callable[[User], User]:
     return check_role
 
 
-AdminUser = Annotated[User, Depends(require_roles(Role.ADMIN))]
+READ_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+def require_admin(request: Request, current_user: CurrentUser) -> User:
+    """Admins can do anything; viewers can read (GET) but change nothing."""
+    if current_user.role == Role.ADMIN:
+        return current_user
+    if current_user.role == Role.VIEWER:
+        if request.method in READ_METHODS:
+            return current_user
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You have view-only access: ask an admin to make this change",
+        )
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="You don't have permission to perform this action",
+    )
+
+
+# Management endpoints: admins, and viewers for reads.
+AdminUser = Annotated[User, Depends(require_admin)]
+# Reads that reveal secrets or data (passwords, exports, query results): admins.
+AdminOnly = Annotated[User, Depends(require_roles(Role.ADMIN))]
+# Read-only actions sent as POST (reading logs): admins and viewers.
+ReaderUser = Annotated[User, Depends(require_roles(Role.ADMIN, Role.VIEWER))]

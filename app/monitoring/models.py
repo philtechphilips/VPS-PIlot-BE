@@ -25,6 +25,10 @@ class AlertRule(Base):
     server_id: Mapped[str | None] = mapped_column(
         ForeignKey("servers.id", ondelete="CASCADE")
     )
+    # Limit an app (or domain) rule to one app; None means every app.
+    application_id: Mapped[str | None] = mapped_column(
+        ForeignKey("applications.id", ondelete="CASCADE")
+    )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now()
     )
@@ -59,3 +63,24 @@ class Alert(Base):
     acknowledged_by: Mapped[str | None] = mapped_column(String(64))
     resolved_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    # Notifications for this incident are held back until then.
+    snoozed_until: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+
+
+class MaintenanceWindow(Base):
+    """While it lasts, no new alerts open for its scope and none notify:
+    everything, one server (and what runs on it) or one app."""
+
+    __tablename__ = "maintenance_windows"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    server_id: Mapped[str | None] = mapped_column(
+        ForeignKey("servers.id", ondelete="CASCADE")
+    )
+    application_id: Mapped[str | None] = mapped_column(
+        ForeignKey("applications.id", ondelete="CASCADE")
+    )
+    starts_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    ends_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), index=True)
+    reason: Mapped[str | None] = mapped_column(String(200))
+    created_by: Mapped[str] = mapped_column(String(64))

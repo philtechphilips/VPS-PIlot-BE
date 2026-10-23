@@ -251,12 +251,70 @@ def listening_ports() -> list[int]:
     return sorted(ports)[:2000]
 
 
+UPDATES_EVERY = 6 * 3600  # apt's own timer refreshes the lists daily
+MAX_PACKAGES = 200
+_updates: dict[str, Any] = {"at": 0.0, "data": None}
+
+
+def _apt_updates() -> dict[str, Any] | None:
+    """Pending package updates from apt's cache (read-only: the lists are
+    refreshed by the system's apt-daily timer, or by an upgrade job)."""
+    if shutil.which("apt") is None:
+        return None
+    try:
+        done = subprocess.run(
+            ["apt", "list", "--upgradable"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+            env={"LANG": "C", "PATH": "/usr/sbin:/usr/bin:/sbin:/bin"},
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    packages = []
+    for line in done.stdout.splitlines():
+        # openssl/jammy-updates,jammy-security 3.0.2-0ubuntu1.18 amd64 [upgradable…]
+        name, slash, rest = line.partition("/")
+        if not slash or " " not in rest or "[upgradable" not in rest:
+            continue
+        suites, version = rest.split(" ")[0], rest.split(" ")[1]
+        packages.append(
+            {
+                "name": name[:100],
+                "version": version[:100],
+                "security": "security" in suites,
+            }
+        )
+    security = [p for p in packages if p["security"]]
+    return {
+        "total": len(packages),
+        "security": len(security),
+        # Security fixes first, so the shortened list keeps them.
+        "packages": (security + [p for p in packages if not p["security"]])[
+            :MAX_PACKAGES
+        ],
+        "reboot_required": os.path.exists("/var/run/reboot-required"),
+        "checked_at": int(time.time()),
+    }
+
+
+def updates(force: bool = False) -> dict[str, Any] | None:
+    if force or time.time() - _updates["at"] > UPDATES_EVERY:
+        _updates["at"], _updates["data"] = time.time(), _apt_updates()
+    return _updates["data"]
+
+
 def inventory() -> dict[str, Any]:
     docker_access, containers = _containers()
-    return {
+    out = {
         "services": _services(),
         "containers": containers,
         "runtimes": _runtimes(),
         "docker_access": docker_access,
         "listening_ports": listening_ports(),
     }
+    pending = updates()
+    if pending is not None:
+        out["updates"] = pending
+    return out

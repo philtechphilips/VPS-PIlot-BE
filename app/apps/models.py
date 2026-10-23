@@ -60,6 +60,12 @@ class Application(Base):
     health_timeout_seconds: Mapped[int] = mapped_column(server_default="60")
     cpu_limit: Mapped[str | None] = mapped_column(String(16))  # e.g. "1.0"
     memory_limit: Mapped[str | None] = mapped_column(String(16))  # e.g. "512m"
+    # Docker apps: the folder inside the container kept across deploys (the
+    # vp-<app>-data volume), e.g. /app/uploads. Backed up with the app.
+    data_path: Mapped[str | None] = mapped_column(String(200))
+    # Error lines containing any of these (case-insensitive) aren't counted
+    # by the agent for the App logging errors rule.
+    error_ignore: Mapped[list[str]] = mapped_column(JSON, default=list)
 
     # [{"key": ..., "value": <encrypted>, "secret": bool}], see apps.service
     env: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
@@ -157,3 +163,30 @@ class AppErrorMetric(Base):
     errors: Mapped[int]
     # The latest error line, secrets masked by the agent; encrypted at rest.
     sample: Mapped[str | None] = mapped_column(Text)
+
+
+class AppCronJob(Base):
+    """A command run inside an app on a cron schedule (see apps.crons)."""
+
+    __tablename__ = "app_cron_jobs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    application_id: Mapped[str] = mapped_column(
+        ForeignKey("applications.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(60))
+    schedule: Mapped[str] = mapped_column(String(100))  # 5-field cron or @daily
+    timezone: Mapped[str] = mapped_column(String(64), server_default="UTC")
+    command: Mapped[str] = mapped_column(String(500))
+    enabled: Mapped[bool] = mapped_column(Boolean, server_default="true")
+    timeout_minutes: Mapped[int] = mapped_column(server_default="60")
+    next_run_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    last_run_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    # running | succeeded | failed | skipped
+    last_status: Mapped[str | None] = mapped_column(String(16))
+    last_error: Mapped[str | None] = mapped_column(String(300))
+    last_job_id: Mapped[str | None] = mapped_column(String(32))
+    created_by: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now()
+    )

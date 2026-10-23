@@ -47,6 +47,7 @@ Running the installer again is safe. It keeps the existing secrets and data.
 | `sudo vpspilot restore FILE` | Restore a file made by `vpspilot backup` |
 | `sudo vpspilot restart` | Apply edits to `.env` (recreates the API and dashboard) |
 | `sudo vpspilot admin EMAIL` | Add another admin, or promote an existing user |
+| `sudo vpspilot viewer EMAIL` | Add a view-only user: sees everything except secrets, changes nothing |
 
 `vpspilot upgrade` also upgrades the agent on the same server, if one is enrolled there. Upgrade the agents on your other servers from their pages in the dashboard.
 

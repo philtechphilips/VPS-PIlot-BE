@@ -107,8 +107,14 @@ def test_agent_sends_errors_and_moves_its_cursor(monkeypatch):
     monkeypatch.setattr(runner.helper, "call", fake_call)
     agent = runner.Runner.__new__(runner.Runner)
     agent.client, agent.errors_since = FakeClient(), "2026-10-23T10:00:00.000000000Z"
+    agent.error_ignore = {"shop": ["ECONNRESET"]}
     agent.send_app_errors()
-    assert calls == [("app.errors", {"since": "2026-10-23T10:00:00.000000000Z"})]
+    assert calls == [
+        (
+            "app.errors",
+            {"since": "2026-10-23T10:00:00.000000000Z", "ignore": agent.error_ignore},
+        )
+    ]
     assert posts == [("/agent/v1/app-errors", {"rows": [{"app": "shop"}]})]
     assert agent.errors_since == reply["until"]
 
@@ -191,3 +197,30 @@ def test_error_rule_threshold_is_a_count(client, admin_headers):
         headers=admin_headers,
     )
     assert made.status_code == 201 and made.json()["threshold"] == 250
+
+
+def test_ignored_lines_are_not_counted(monkeypatch):
+    monkeypatch.setattr(apperrors, "_sources", lambda: [("shop", "docker", "vp-shop")])
+
+    def lines(name, since, until, deadline):
+        yield 1_792_000_020, "Error: read ECONNRESET", None
+        yield 1_792_000_021, "TypeError: boom", None
+
+    monkeypatch.setattr(apperrors, "_docker_lines", lines)
+    out = apperrors.scan(
+        {"since": "2026-10-01T00:00:00Z", "ignore": {"shop": ["econnreset"]}}
+    )
+    rows = json.loads(out["output"])["rows"]
+    assert rows[0]["errors"] == 1 and rows[0]["sample"] == "TypeError: boom"
+
+
+def test_ignore_lists_reach_the_agent(client, admin_headers):
+    server_id, agent = enrolled_agent(client, admin_headers)
+    app = client.post(APPS, json=git_app(server_id), headers=admin_headers).json()
+    client.patch(
+        f"{APPS}/{app['id']}",
+        json={"error_ignore": ["ECONNRESET", "DeprecationWarning", "ECONNRESET"]},
+        headers=admin_headers,
+    )
+    reply = client.post("/agent/v1/heartbeat", json={"facts": {}}, headers=agent).json()
+    assert reply["error_ignore"] == {"shop": ["ECONNRESET", "DeprecationWarning"]}

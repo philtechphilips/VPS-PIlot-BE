@@ -24,9 +24,15 @@ def _tick() -> None:
         from app.domains import service as domains
 
         domains.refresh_due(db)
+        from app.domains import uptime
+
+        uptime.check_due(db)
         from app.backups import service as backups
 
         backups.run_due(db)
+        from app.apps import crons
+
+        crons.run_due(db)
         from app.databases import service as databases
 
         databases.sample_due(db)
@@ -55,6 +61,9 @@ def start() -> threading.Thread | None:
     interval = settings.alerts_evaluate_seconds
     if interval <= 0:
         return None
+    from app.notifications import telegram
+
+    telegram.start()
     _stop.clear()
     thread = threading.Thread(
         target=_loop, args=(interval,), name="alerts", daemon=True
@@ -64,4 +73,7 @@ def start() -> threading.Thread | None:
 
 
 def stop() -> None:
+    from app.notifications import telegram
+
+    telegram.stop()
     _stop.set()

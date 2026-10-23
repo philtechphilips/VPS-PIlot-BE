@@ -238,6 +238,7 @@ def create_app(db: Session, server: Server, data: dict[str, Any]) -> Application
         health_timeout_seconds=data.get("health_timeout_seconds") or 60,
         cpu_limit=data.get("cpu_limit"),
         memory_limit=data.get("memory_limit"),
+        data_path=data.get("data_path") if runtime == "docker" else None,
         env=encode_env(data.get("env") or [], []),
     )
     db.add(app)
@@ -272,6 +273,10 @@ def update_settings(db: Session, app: Application, data: dict[str, Any]) -> Appl
     ):
         if field in data:
             setattr(app, field, data[field])
+    if "data_path" in data and app.runtime == "docker":
+        app.data_path = data["data_path"] or None
+    if data.get("error_ignore") is not None:
+        app.error_ignore = list(dict.fromkeys(data["error_ignore"]))
     if "env" in data and data["env"] is not None:
         app.env = encode_env(data["env"], app.env or [])
     db.commit()
@@ -318,6 +323,7 @@ def _payload(
         "health_timeout": app.health_timeout_seconds,
         "cpus": app.cpu_limit,
         "memory": app.memory_limit,
+        "data_path": app.data_path if app.runtime == "docker" else None,
         "has_env": True,
         "build_command": app.build_command,
         "start_command": app.start_command,

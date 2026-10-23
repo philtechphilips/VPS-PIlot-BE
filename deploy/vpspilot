@@ -9,6 +9,7 @@
 #   vpspilot backup [DIR]      dump the control-plane database and its keys
 #   vpspilot restore FILE      restore a dump made by `vpspilot backup`
 #   vpspilot admin EMAIL       add another admin (or promote a user)
+#   vpspilot viewer EMAIL      add a view-only user (sees everything, changes nothing)
 set -euo pipefail
 
 ROOT="/opt/vpspilot"
@@ -115,8 +116,12 @@ case "${1:-status}" in
     need_root
     docker exec -it vpspilot-api python -m app.users.create_admin "${2:?usage: vpspilot admin EMAIL}"
     ;;
+  viewer)
+    need_root
+    docker exec -it vpspilot-api python -m app.users.create_admin --viewer "${2:?usage: vpspilot viewer EMAIL}"
+    ;;
   *)
-    sed -n '2,13p' "$0"
+    sed -n '2,14p' "$0"
     exit 2
     ;;
 esac

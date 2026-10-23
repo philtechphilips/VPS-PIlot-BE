@@ -16,7 +16,7 @@ from tests.test_jobs import claim
 from tests.test_servers import enrolled_agent
 
 
-def _agent(db: Session, server_id: str, version: str = "1.1.0") -> None:
+def _agent(db: Session, server_id: str, version: str = "1.1.4") -> None:
     server = db.get(Server, server_id)
     server.agent_version = version
     db.commit()
@@ -428,3 +428,44 @@ def test_builds_keep_docker_config_out_of_the_protected_home(tmp_path, monkeypat
     assert env["DOCKER_CONFIG"] == str(tmp_path / ".docker")
     assert (tmp_path / ".docker").is_dir()
     assert not env["DOCKER_CONFIG"].startswith("/root")
+
+
+def test_docker_deploys_hand_traffic_to_the_new_version(monkeypatch, tmp_path):
+    """The healthy candidate answers to the app's name before the live
+    container stops, and leaves only once the new live one is up."""
+    calls = []
+
+    def fake_run(cmd, timeout=60, **kwargs):
+        calls.append(cmd)
+        return 0, ""
+
+    monkeypatch.setattr(deploy, "APPS_DIR", str(tmp_path))
+    monkeypatch.setattr(deploy.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(deploy, "_run", fake_run)
+    monkeypatch.setattr(deploy, "_check_port", lambda *a: None)
+    monkeypatch.setattr(deploy, "_pull", lambda *a: None)
+    monkeypatch.setattr(deploy, "_loopback_port", lambda *a: 32768)
+    monkeypatch.setattr(deploy, "_healthy", lambda *a, **k: True)
+    monkeypatch.setattr(deploy, "_container_exists", lambda name: True)
+    monkeypatch.setattr(deploy, "_prune_images", lambda *a: None)
+    monkeypatch.setattr(deploy, "_remove", lambda name: calls.append(["rm", name]))
+    spec = {
+        "app": "shop", "deployment_id": "a" * 32, "runtime": "docker",
+        "source": {"type": "image", "image": "nginx:alpine", "pull": True},
+        "container_port": 80, "host_port": 20001, "health_path": "/",
+        "health_timeout": 30, "env": {}, "has_env": True,
+    }  # fmt: skip
+    result = deploy.deploy(spec, lambda *a: None)
+    assert result["exit_code"] == 0, result
+
+    def at(prefix):
+        return next(i for i, c in enumerate(calls) if c[: len(prefix)] == prefix)
+
+    joined = at(["docker", "network", "connect", "--alias", "vp-shop"])
+    renamed = at(["docker", "rename", "vp-shop", "vp-shop-previous"])
+    live = next(
+        i for i, c in enumerate(calls) if c[:2] == ["docker", "run"] and "vp-shop" in c
+    )
+    retired = at(["docker", "stop", "-t", "10", "vp-shop-candidate"])
+    assert joined < renamed < live < retired
+    assert ["rm", "vp-shop-candidate"] in calls[retired:]

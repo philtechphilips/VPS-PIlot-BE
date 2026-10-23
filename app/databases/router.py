@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field, StringConstraints
 
 from app.apps.models import Application
 from app.audit import service as audit
-from app.auth.dependencies import AdminUser
+from app.auth.dependencies import AdminOnly, AdminUser
 from app.core import artifacts
 from app.core.config import settings
 from app.core.database import DbSession
@@ -294,7 +294,7 @@ def export_database(
 
 @router.get("/{instance_id}/exports/{job_id}")
 def download_export(
-    instance_id: str, job_id: str, request: Request, db: DbSession, user: AdminUser
+    instance_id: str, job_id: str, request: Request, db: DbSession, user: AdminOnly
 ):
     instance = _get(db, instance_id)
     try:
@@ -421,7 +421,7 @@ def control(
 
 
 @router.get("/{instance_id}/connection")
-def connection(instance_id: str, request: Request, db: DbSession, user: AdminUser):
+def connection(instance_id: str, request: Request, db: DbSession, user: AdminOnly):
     """Logins with passwords and ready-made URLs. Viewing is audited."""
     instance = _get(db, instance_id)
     _audit(db, user, request, "database.credentials.view", instance, result="success")
@@ -490,7 +490,7 @@ def redis(
 
 
 @router.get("/{instance_id}/jobs/{job_id}")
-def job_result(instance_id: str, job_id: str, db: DbSession, _: AdminUser):
+def job_result(instance_id: str, job_id: str, db: DbSession, _: AdminOnly):
     """Poll an operation: {status, error, data}."""
     jobs.reap(db)
     instance = _get(db, instance_id)

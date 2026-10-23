@@ -43,6 +43,11 @@ SUPPORTED = {
     "backup.restore",
     "backup.delete",
     "backup.storage_test",
+    "backup.files",
+    "backup.files_restore",
+    "os.upgrade",
+    "os.reboot",
+    "app.exec",
 }
 # Long operations that stream progress from the helper.
 STREAMING = {
@@ -53,6 +58,10 @@ STREAMING = {
     "proxy.apply",
     "backup.create",
     "backup.restore",
+    "backup.files",
+    "backup.files_restore",
+    "os.upgrade",
+    "app.exec",
     "db.export",
     "db.import",
 }
@@ -210,7 +219,7 @@ def _run_streaming(
                 False, None, "", f"Couldn't load credentials: {error.message}"
             )
     transfer = None
-    if job["type"] in ("db.export", "db.import"):
+    if job["type"] in ("db.export", "db.import", "app.exec"):
         args["job_id"] = job["id"]
     if job["type"] == "db.import":
         # The uploaded file comes down to the agent's own directory first.

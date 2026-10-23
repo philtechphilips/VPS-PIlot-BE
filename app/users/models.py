@@ -10,6 +10,8 @@ from app.core.database import Base
 class Role(StrEnum):
     USER = "user"
     ADMIN = "admin"
+    # Sees everything (except secrets and query results), changes nothing.
+    VIEWER = "viewer"
 
 
 class User(Base):

@@ -2,7 +2,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, status
 
-from app.auth.dependencies import AdminUser, CurrentUser
+from app.auth.dependencies import AdminOnly, AdminUser, CurrentUser
 from app.core.database import DbSession
 from app.users import service
 from app.users.models import Role
@@ -21,7 +21,7 @@ def get_me(current_user: CurrentUser):
 @router.get("/", response_model=list[UserResponse])
 def list_users(
     db: DbSession,
-    _: AdminUser,
+    _: AdminOnly,
     limit: Annotated[int, Query(ge=1, le=100)] = 10,
     skip: Annotated[int, Query(ge=0)] = 0,
 ):

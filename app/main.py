@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.apps.cron_router import router as cron_router
 from app.apps.router import router as apps_router
 from app.audit.router import router as audit_router
 from app.auth.router import router as auth_router
@@ -56,6 +57,7 @@ app.include_router(agent_router)
 app.include_router(jobs_router)
 app.include_router(audit_router)
 app.include_router(apps_router)
+app.include_router(cron_router)
 app.include_router(github_router)
 app.include_router(notifications_router)
 app.include_router(monitoring_router)

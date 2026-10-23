@@ -52,6 +52,8 @@ class Runner:
         self.requests_since: str | None = None
         # ...and up to which the apps' logs were scanned for errors.
         self.errors_since: str | None = None
+        # Per app: error lines to leave out (from the heartbeat reply).
+        self.error_ignore: dict[str, list[str]] = {}
 
     def stop(self, *_: Any) -> None:
         log.info("Stopping")
@@ -67,6 +69,8 @@ class Runner:
         )
         if reply.get("jobs_pending"):
             self.next_claim = time.monotonic()
+        if isinstance(reply.get("error_ignore"), dict):
+            self.error_ignore = reply["error_ignore"]
 
     def collect_and_send_metrics(self) -> None:
         self.buffer.append(self.sampler.sample())
@@ -108,7 +112,10 @@ class Runner:
         since = self.errors_since or _minute_ago()
         try:
             result = helper.call(
-                "app.errors", {"since": since}, collectors.HELPER_SOCKET, timeout=60
+                "app.errors",
+                {"since": since, "ignore": self.error_ignore},
+                collectors.HELPER_SOCKET,
+                timeout=60,
             )
             if not result.get("ok"):
                 return
@@ -138,6 +145,8 @@ class Runner:
     def _run_job(self, job: dict[str, Any]) -> None:
         try:
             executor.run_job(self.client, job)
+            if job.get("type") == "os.upgrade":
+                collectors.updates(force=True)  # report what's left right away
         except NotEnrolled:
             self.revoked = True
             self.stopping = True

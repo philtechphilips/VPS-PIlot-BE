@@ -6,6 +6,8 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field, StringConstraints
 from sqlalchemy import func, select
 
+from app.apps import service as apps
+from app.apps.models import Application
 from app.audit import service as audit
 from app.auth.dependencies import AdminUser
 from app.backups import gdrive, service
@@ -39,6 +41,12 @@ class RunIn(BaseModel):
 class RestoreIn(BaseModel):
     mode: Literal["replace", "new"]
     into: DbIdent | None = None
+
+
+class AppPolicyIn(BaseModel):
+    enabled: bool | None = None
+    every_hours: Annotated[int, Field(ge=1, le=24 * 30)] | None = None
+    keep: Annotated[int, Field(ge=1, le=365)] | None = None
 
 
 class SettingsIn(BaseModel):
@@ -79,12 +87,17 @@ class SettingsIn(BaseModel):
 
 
 def _run_out(db, run: BackupRun) -> dict:
-    instance = db.get(DatabaseInstance, run.instance_id)
+    instance = db.get(DatabaseInstance, run.instance_id) if run.instance_id else None
+    app = db.get(Application, run.application_id) if run.application_id else None
     return {
         "id": run.id,
+        "kind": "files" if run.application_id else "database",
         "instance_id": run.instance_id,
         "instance_name": instance.name if instance else None,
         "engine": instance.engine if instance else None,
+        "application_id": run.application_id,
+        "application_name": app.name if app else None,
+        "files": (run.meta or {}).get("files"),
         "database": run.database,
         "trigger": run.trigger,
         "status": run.status,
@@ -162,9 +175,11 @@ def list_runs(
     instance_id: Annotated[str, Query(max_length=32)] | None = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     before: Annotated[str, Query(max_length=32)] | None = None,
+    application_id: Annotated[str, Query(max_length=32)] | None = None,
 ):
     jobs.reap(db)
-    return [_run_out(db, r) for r in service.list_runs(db, instance_id, limit, before)]
+    runs = service.list_runs(db, instance_id, limit, before, application_id)
+    return [_run_out(db, r) for r in runs]
 
 
 @router.get("/summary")
@@ -264,6 +279,61 @@ def run_now(body: RunIn, request: Request, db: DbSession, user: AdminUser):
     except service.BackupError as error:
         _raise(error)
     return [_run_out(db, r) for r in runs]
+
+
+def _get_app(db, app_id: str) -> Application:
+    app = apps.get_app(db, app_id)
+    if app is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Application not found")
+    return app
+
+
+def _app_policy_out(db, app: Application) -> dict:
+    policy = service.get_app_policy(db, app.id)
+    return {
+        "application_id": app.id,
+        "enabled": bool(policy and policy.enabled),
+        "every_hours": policy.every_hours if policy else 24,
+        "keep": policy.keep if policy else 7,
+        "next_run_at": policy.next_run_at if policy and policy.enabled else None,
+        # Docker apps need a data folder; the others always have something.
+        "ready": app.runtime != "docker" or bool(app.data_path),
+    }
+
+
+@router.get("/apps/{app_id}/policy")
+def app_policy(app_id: str, db: DbSession, _: AdminUser):
+    return _app_policy_out(db, _get_app(db, app_id))
+
+
+@router.put("/apps/{app_id}/policy")
+def set_app_policy(
+    app_id: str, body: AppPolicyIn, request: Request, db: DbSession, user: AdminUser
+):
+    app = _get_app(db, app_id)
+    policy = service.set_app_policy(db, app, body.model_dump(exclude_unset=True))
+    _audit(
+        db,
+        user,
+        request,
+        "backup.policy",
+        f"{app.name} (files)",
+        f"{'on' if policy.enabled else 'off'}, every {policy.every_hours}h, "
+        f"keep {policy.keep}",
+        result="success",
+    )
+    return _app_policy_out(db, app)
+
+
+@router.post("/apps/{app_id}/run", status_code=status.HTTP_202_ACCEPTED)
+def run_app_now(app_id: str, request: Request, db: DbSession, user: AdminUser):
+    app = _get_app(db, app_id)
+    actor, label = audit.user_actor(user)
+    try:
+        run = service.run_app_backup(db, app, "manual", actor, label, request)
+    except service.BackupError as error:
+        _raise(error)
+    return _run_out(db, run)
 
 
 @router.post("/{run_id}/verify", status_code=status.HTTP_202_ACCEPTED)

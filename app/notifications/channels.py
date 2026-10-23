@@ -33,8 +33,14 @@ logger = logging.getLogger(__name__)
 
 PURPOSE = "alert-channels"
 KINDS = ("webhook", "slack", "telegram")
-EVENTS = ("alert.firing", "alert.resolved", "deployment.failed", "deployment.succeeded")
-DEFAULT_EVENTS = ["alert.firing", "alert.resolved", "deployment.failed"]
+EVENTS = (
+    "alert.firing",
+    "alert.resolved",
+    "deployment.failed",
+    "deployment.succeeded",
+    "job.failed",
+)
+DEFAULT_EVENTS = ["alert.firing", "alert.resolved", "deployment.failed", "job.failed"]
 TIMEOUT = 10
 TELEGRAM_TOKEN_RE = re.compile(r"\d{5,12}:[A-Za-z0-9_-]{30,50}")
 TELEGRAM_CHAT_RE = re.compile(r"-?\d{1,20}|@[A-Za-z0-9_]{5,32}")
@@ -43,6 +49,7 @@ EMOJI = {
     "alert.resolved": "✅",
     "deployment.failed": "❌",
     "deployment.succeeded": "🚀",
+    "job.failed": "⏰",
 }
 
 
@@ -216,6 +223,7 @@ def create(
     config: dict[str, Any],
     events: list[str] | None,
     label: str,
+    commands: bool = False,
 ) -> tuple[AlertChannel, str | None]:
     """Returns the channel and, for webhooks, its signing secret (shown once)."""
     if kind not in KINDS:
@@ -232,6 +240,7 @@ def create(
         target_label=target[:120],
         events=_events(events),
         enabled=True,
+        commands=commands and kind == "telegram",
         created_by=label[:64],
         created_at=_now(),
     )
@@ -247,6 +256,8 @@ def update(db: Session, channel: AlertChannel, data: dict[str, Any]) -> AlertCha
         channel.events = _events(data["events"])
     if data.get("enabled") is not None:
         channel.enabled = bool(data["enabled"])
+    if data.get("commands") is not None:
+        channel.commands = bool(data["commands"]) and channel.kind == "telegram"
     if data.get("config"):
         clean, target = _validate(channel.kind, data["config"])
         if channel.kind == "webhook":

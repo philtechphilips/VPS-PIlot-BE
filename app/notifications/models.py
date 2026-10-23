@@ -1,6 +1,17 @@
 from datetime import datetime
 
-from sqlalchemy import JSON, TIMESTAMP, ForeignKey, Index, String, Text, func, true
+from sqlalchemy import (
+    JSON,
+    TIMESTAMP,
+    BigInteger,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    false,
+    func,
+    true,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -61,3 +72,6 @@ class AlertChannel(Base):
     )
     last_sent_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     last_error: Mapped[str | None] = mapped_column(String(300))
+    # Telegram only: answer /status, /apps and /alerts from the chat.
+    commands: Mapped[bool] = mapped_column(server_default=false())
+    update_offset: Mapped[int | None] = mapped_column(BigInteger)

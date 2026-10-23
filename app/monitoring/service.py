@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from app.apps.models import Application
 from app.core.config import settings
 from app.core.security import new_id
-from app.monitoring.models import Alert, AlertRule
+from app.monitoring.models import Alert, AlertRule, MaintenanceWindow
 from app.servers.models import MetricSample, Server
 
 logger = logging.getLogger(__name__)
@@ -42,6 +42,9 @@ class Kind:
     duration: int = 5
     severity: str = "warning"
     enabled: bool = True
+    # What the threshold means: percent (metric rules and error rate), count
+    # (error lines), days (certificates) or hours (backups).
+    unit: str = "percent"
 
 
 KINDS: dict[str, Kind] = {
@@ -56,13 +59,26 @@ KINDS: dict[str, Kind] = {
     "app_down": Kind(
         "Application down", "application", duration=2, severity="critical"
     ),
+    # threshold = pending security updates, for longer than the duration
+    # (3 days: unattended-upgrades usually installs them overnight)
+    "updates_pending": Kind(
+        "Security updates pending", "server", threshold=1, duration=4320, unit="count"
+    ),
     # threshold = error lines logged within the rule's duration
-    "app_errors": Kind("App logging errors", "application", threshold=1, duration=5),
+    "app_errors": Kind(
+        "App logging errors", "application", threshold=1, duration=5, unit="count"
+    ),
+    # threshold = % of requests through the app's domains answered with 5xx
+    "error_rate": Kind("High error rate", "application", threshold=5, duration=5),
+    # Failing uptime checks for the rule's duration (see domains.uptime)
+    "site_down": Kind("Site down", "domain", duration=2, severity="critical"),
     # threshold = days of validity left (Let's Encrypt domains only)
-    "tls_expiring": Kind("Certificate expiring", "domain", threshold=14, duration=0),
+    "tls_expiring": Kind(
+        "Certificate expiring", "domain", threshold=14, duration=0, unit="days"
+    ),
     # threshold = hours since the last good backup (databases with a schedule)
     "backup_stale": Kind(
-        "Backups stale or failing", "database", threshold=36, duration=0
+        "Backups stale or failing", "database", threshold=36, duration=0, unit="hours"
     ),
 }
 
@@ -121,9 +137,9 @@ def _check_threshold(spec: Kind, value: float | None) -> None:
         return
     if spec.threshold is None:
         raise RuleError(422, "This rule has no threshold")
-    if spec.metric and value >= 100:
-        raise RuleError(422, "A percentage threshold must be below 100")
-    if not spec.metric and value < 1:
+    if spec.unit == "percent" and not 0 < value < 100:
+        raise RuleError(422, "A percentage threshold must be between 0 and 100")
+    if spec.unit != "percent" and value < 1:
         raise RuleError(422, "The threshold must be at least 1")
 
 
@@ -138,6 +154,11 @@ def create_rule(db: Session, data: dict[str, Any]) -> AlertRule:
         raise RuleError(422, "This rule applies to applications, not one server")
     if data.get("server_id") and db.get(Server, data["server_id"]) is None:
         raise RuleError(404, "Server not found")
+    if data.get("application_id"):
+        if spec.target != "application" and data["kind"] != "site_down":
+            raise RuleError(422, "Only app rules can be limited to one app")
+        if db.get(Application, data["application_id"]) is None:
+            raise RuleError(404, "Application not found")
     rule = AlertRule(
         id=new_id(),
         kind=data["kind"],
@@ -148,6 +169,7 @@ def create_rule(db: Session, data: dict[str, Any]) -> AlertRule:
         enabled=data.get("enabled", True),
         notify_email=data.get("notify_email", True),
         server_id=data.get("server_id"),
+        application_id=data.get("application_id"),
     )
     db.add(rule)
     db.commit()
@@ -224,6 +246,7 @@ def _check_metric(db: Session, rule: AlertRule, server: Server, now: datetime) -
 
 
 def _scheduled_databases(db: Session) -> list[tuple[str, str, Any]]:
+    """Targets of the backup rule: databases and apps with a schedule."""
     from app.backups.models import BackupPolicy
     from app.databases.models import DatabaseInstance
 
@@ -231,6 +254,11 @@ def _scheduled_databases(db: Session) -> list[tuple[str, str, Any]]:
     for policy in db.scalars(
         select(BackupPolicy).where(BackupPolicy.enabled.is_(True))
     ):
+        if policy.application_id:
+            app = db.get(Application, policy.application_id)
+            if app is not None:
+                out.append((app.id, f"{app.name} (files)", policy))
+            continue
         instance = db.get(DatabaseInstance, policy.instance_id)
         if instance is not None:
             out.append((instance.id, instance.name, policy))
@@ -240,10 +268,15 @@ def _scheduled_databases(db: Session) -> list[tuple[str, str, Any]]:
 def _check_backups(db: Session, rule: AlertRule, policy, now: datetime) -> Check:
     from app.backups.models import BackupRun
 
+    owner = (
+        BackupRun.application_id == policy.application_id
+        if policy.application_id
+        else BackupRun.instance_id == policy.instance_id
+    )
     latest = db.scalar(
         select(BackupRun)
         .where(
-            BackupRun.instance_id == policy.instance_id,
+            owner,
             BackupRun.status.in_(("succeeded", "failed")),
         )
         .order_by(BackupRun.created_at.desc())
@@ -251,9 +284,7 @@ def _check_backups(db: Session, rule: AlertRule, policy, now: datetime) -> Check
     )
     good = db.scalar(
         select(BackupRun.finished_at)
-        .where(
-            BackupRun.instance_id == policy.instance_id, BackupRun.status == "succeeded"
-        )
+        .where(owner, BackupRun.status == "succeeded")
         .order_by(BackupRun.created_at.desc())
         .limit(1)
     )
@@ -273,6 +304,39 @@ def _check_backups(db: Session, rule: AlertRule, policy, now: datetime) -> Check
     hours = (now - _aware(good)).total_seconds() / 3600
     detail = f"Last good backup {int(hours)} h ago (limit {rule.threshold:.0f} h)"
     return Check(hours > rule.threshold, round(hours, 1), detail)
+
+
+def _check_site(db: Session, rule: AlertRule, domain, now: datetime) -> Check:
+    from app.domains.models import UptimeCheck
+
+    latest = db.scalar(
+        select(UptimeCheck)
+        .where(UptimeCheck.domain_id == domain.id)
+        .order_by(UptimeCheck.ts.desc())
+        .limit(1)
+    )
+    if latest is None or now - _aware(latest.ts) > timedelta(minutes=5):
+        return Check(None)  # not checked lately (control plane just started)
+    if latest.ok:
+        return Check(False, latest.ms, f"Up again ({latest.status_code})")
+    last_ok = db.scalar(
+        select(func.max(UptimeCheck.ts)).where(
+            UptimeCheck.domain_id == domain.id, UptimeCheck.ok.is_(True)
+        )
+    )
+    first_fail = db.scalar(
+        select(func.min(UptimeCheck.ts)).where(
+            UptimeCheck.domain_id == domain.id,
+            UptimeCheck.ok.is_(False),
+            *([UptimeCheck.ts > last_ok] if last_ok else []),
+        )
+    )
+    minutes = (now - _aware(first_fail)).total_seconds() / 60
+    reason = latest.error or f"HTTP {latest.status_code}"
+    detail = f"{reason} for {max(1, round(minutes))} min"
+    if minutes >= rule.duration_minutes:
+        return Check(True, None, detail)
+    return Check(None, None, detail)
 
 
 def _check_certificate(rule: AlertRule, domain, now: datetime) -> Check:
@@ -303,6 +367,50 @@ def _check_errors(
     if quiet == 0:
         return Check(False, 0.0, "No errors logged")
     return Check(None, float(count))
+
+
+ERROR_RATE_MIN_REQUESTS = 20  # fewer requests in the window: too few to judge
+
+
+def _check_error_rate(
+    db: Session, rule: AlertRule, app: Application, now: datetime
+) -> Check:
+    from app.apps.models import RequestMetric
+
+    since = (now - timedelta(minutes=max(rule.duration_minutes, 1))).replace(
+        second=0, microsecond=0
+    )
+    requests, errors = db.execute(
+        select(
+            func.coalesce(func.sum(RequestMetric.requests), 0),
+            func.coalesce(func.sum(RequestMetric.s5xx), 0),
+        ).where(RequestMetric.application_id == app.id, RequestMetric.minute >= since)
+    ).one()
+    if requests < ERROR_RATE_MIN_REQUESTS:
+        return Check(False if not errors else None)
+    rate = 100 * errors / requests
+    detail = (
+        f"{rate:.1f}% of {requests} requests failed with 5xx in "
+        f"{rule.duration_minutes} min (limit {rule.threshold:g}%)"
+    )
+    if rate > rule.threshold:
+        return Check(True, round(rate, 2), detail)
+    if rate <= max(rule.threshold - HYSTERESIS, rule.threshold / 2):
+        return Check(False, round(rate, 2), detail)
+    return Check(None, round(rate, 2), detail)
+
+
+def _check_updates(rule: AlertRule, server: Server, now: datetime) -> Check:
+    updates = (server.inventory or {}).get("updates")
+    if not updates or server.inventory_at is None:
+        return Check(None)  # older agent, or not apt-based
+    count = int(updates.get("security") or 0)
+    detail = (
+        f"{count} security update{'s' if count != 1 else ''} pending "
+        f"({updates.get('total', count)} in all)"
+        + ("; a reboot is required" if updates.get("reboot_required") else "")
+    )
+    return Check(count >= rule.threshold, float(count), detail)
 
 
 def _check_app(app: Application, server: Server | None, now: datetime) -> Check:
@@ -358,6 +466,54 @@ def _open_alerts(db: Session, rule_id: str) -> list[Alert]:
     )
 
 
+@dataclass
+class Paused:
+    """What active maintenance windows cover."""
+
+    everything: bool = False
+    servers: frozenset[str] = frozenset()
+    apps: frozenset[str] = frozenset()
+
+    def covers(self, target: Any) -> bool:
+        if self.everything:
+            return True
+        server = getattr(target, "server_id", None)
+        app = getattr(target, "application_id", None)
+        if isinstance(target, Server):
+            server = target.id
+        elif isinstance(target, Application):
+            app = target.id
+        return (server in self.servers) or (app in self.apps)
+
+
+def _paused(db: Session, now: datetime) -> Paused:
+    windows = list(
+        db.scalars(
+            select(MaintenanceWindow).where(
+                MaintenanceWindow.starts_at <= now, MaintenanceWindow.ends_at > now
+            )
+        )
+    )
+    return Paused(
+        everything=any(not w.server_id and not w.application_id for w in windows),
+        servers=frozenset(w.server_id for w in windows if w.server_id),
+        apps=frozenset(w.application_id for w in windows if w.application_id),
+    )
+
+
+def _scope(db: Session, target: Any) -> Any:
+    """Something with server_id/application_id for a rule target (database
+    backup policies carry neither)."""
+    from app.backups.models import BackupPolicy
+    from app.databases.models import DatabaseInstance
+
+    if isinstance(target, BackupPolicy):
+        if target.application_id:
+            return db.get(Application, target.application_id)
+        return db.get(DatabaseInstance, target.instance_id)
+    return target
+
+
 def evaluate(db: Session, now: datetime | None = None) -> dict[str, int]:
     """Check every enabled rule once. Returns counts of transitions."""
     from app.notifications import service as notifications
@@ -377,13 +533,18 @@ def evaluate(db: Session, now: datetime | None = None) -> dict[str, int]:
     from app.domains.models import Domain
 
     certs = list(db.scalars(select(Domain).where(Domain.tls_mode == "auto")))
+    paused = _paused(db, now)
 
     for rule in db.scalars(select(AlertRule).where(AlertRule.enabled.is_(True))):
         spec = KINDS.get(rule.kind)
         if spec is None:
             continue
         open_by_target = {a.target_id: a for a in _open_alerts(db, rule.id)}
-        if spec.target == "domain":
+        if rule.kind == "site_down":
+            from app.domains import uptime
+
+            targets = [(d.id, d.hostname, d) for d, _ in uptime.watched(db)]
+        elif spec.target == "domain":
             targets = [(d.id, d.hostname, d) for d in certs]
         elif spec.target == "database":
             targets = _scheduled_databases(db)
@@ -404,6 +565,14 @@ def evaluate(db: Session, now: datetime | None = None) -> dict[str, int]:
                 )
                 for a in apps
             ]
+        if rule.application_id:
+            # A rule for one app: its own record, or its domains.
+            targets = [
+                t
+                for t in targets
+                if t[0] == rule.application_id
+                or getattr(t[2], "application_id", None) == rule.application_id
+            ]
         seen = set()
         for target_id, label, target in targets:
             seen.add(target_id)
@@ -411,23 +580,35 @@ def evaluate(db: Session, now: datetime | None = None) -> dict[str, int]:
                 check = _check_offline(rule, target, now)
             elif rule.kind == "tls_expiring":
                 check = _check_certificate(rule, target, now)
+            elif rule.kind == "updates_pending":
+                check = _check_updates(rule, target, now)
+            elif rule.kind == "site_down":
+                check = _check_site(db, rule, target, now)
             elif rule.kind == "backup_stale":
                 check = _check_backups(db, rule, target, now)
             elif rule.kind == "app_errors":
                 check = _check_errors(db, rule, target, now)
+            elif rule.kind == "error_rate":
+                check = _check_error_rate(db, rule, target, now)
             elif spec.metric:
                 check = _check_metric(db, rule, target, now)
             else:
                 check = _check_app(target, by_id.get(target.server_id), now)
             alert = open_by_target.get(target_id)
+            quiet = paused.covers(_scope(db, target))
             if check.breached is True:
+                if alert is None and quiet:
+                    continue  # maintenance: don't open incidents
                 if alert is None:
                     # Offline and metric rules already waited out their window.
-                    wait = rule.kind == "app_down"
+                    wait = rule.kind in ("app_down", "updates_pending")
                     alert = Alert(
                         id=new_id(),
                         rule_id=rule.id,
-                        target_type=spec.target,
+                        # App file backups share the backup rule but link to the app.
+                        target_type="application"
+                        if getattr(target, "application_id", None)
+                        else spec.target,
                         target_id=target_id,
                         target_label=label[:120],
                         severity=rule.severity,
@@ -440,13 +621,15 @@ def evaluate(db: Session, now: datetime | None = None) -> dict[str, int]:
                     db.add(alert)
                     if not wait:
                         counts["fired"] += 1
-                        _announce(db, notifications, rule, alert, check, firing=True)
+                        _announce(db, notifications, rule, alert, check, True, now)
                 elif alert.state == "pending" and now - _aware(
                     alert.started_at
                 ) >= timedelta(minutes=rule.duration_minutes):
+                    if quiet:
+                        continue  # fires once the maintenance window is over
                     alert.state, alert.fired_at = "firing", now
                     counts["fired"] += 1
-                    _announce(db, notifications, rule, alert, check, firing=True)
+                    _announce(db, notifications, rule, alert, check, True, now)
                 alert.value, alert.detail, alert.updated_at = (
                     check.value,
                     (check.detail or "")[:300] or None,
@@ -463,7 +646,8 @@ def evaluate(db: Session, now: datetime | None = None) -> dict[str, int]:
                     )
                     alert.value = check.value
                     counts["resolved"] += 1
-                    _announce(db, notifications, rule, alert, check, firing=False)
+                    if not quiet:
+                        _announce(db, notifications, rule, alert, check, False, now)
         # Targets that no longer exist (server or app removed).
         for target_id, alert in open_by_target.items():
             if target_id not in seen:
@@ -473,8 +657,16 @@ def evaluate(db: Session, now: datetime | None = None) -> dict[str, int]:
 
 
 def _announce(
-    db, notifications, rule: AlertRule, alert: Alert, check: Check, firing: bool
+    db,
+    notifications,
+    rule: AlertRule,
+    alert: Alert,
+    check: Check,
+    firing: bool,
+    now: datetime,
 ) -> None:
+    if alert.snoozed_until and _aware(alert.snoozed_until) > now:
+        return  # snoozed: the incident is still tracked, just quiet
     notifications.alert_changed(
         db,
         firing=firing,
@@ -500,6 +692,60 @@ def list_alerts(db: Session, state: str = "open", limit: int = 100) -> list[Aler
     return list(
         db.scalars(query.order_by(Alert.started_at.desc(), Alert.id).limit(limit))
     )
+
+
+def snooze(db: Session, alert: Alert, minutes: int | None) -> Alert:
+    """Hold back this incident's notifications (None: wake it up again)."""
+    if alert.state not in ("firing", "acknowledged", "pending"):
+        raise RuleError(409, "Only open alerts can be snoozed")
+    alert.snoozed_until = _now() + timedelta(minutes=minutes) if minutes else None
+    alert.updated_at = _now()
+    db.commit()
+    return alert
+
+
+def list_maintenance(db: Session) -> list[MaintenanceWindow]:
+    """Current and upcoming windows."""
+    return list(
+        db.scalars(
+            select(MaintenanceWindow)
+            .where(MaintenanceWindow.ends_at > _now())
+            .order_by(MaintenanceWindow.starts_at)
+        )
+    )
+
+
+def start_maintenance(
+    db: Session, data: dict[str, Any], label: str
+) -> MaintenanceWindow:
+    if data.get("server_id") and data.get("application_id"):
+        raise RuleError(422, "Pick a server or an app, not both")
+    if data.get("server_id") and db.get(Server, data["server_id"]) is None:
+        raise RuleError(404, "Server not found")
+    if (
+        data.get("application_id")
+        and db.get(Application, data["application_id"]) is None
+    ):
+        raise RuleError(404, "Application not found")
+    starts = data.get("starts_at") or _now()
+    window = MaintenanceWindow(
+        id=new_id(),
+        server_id=data.get("server_id"),
+        application_id=data.get("application_id"),
+        starts_at=starts,
+        ends_at=_aware(starts) + timedelta(minutes=data["minutes"]),
+        reason=(data.get("reason") or "")[:200] or None,
+        created_by=label[:64],
+    )
+    db.add(window)
+    db.commit()
+    db.refresh(window)
+    return window
+
+
+def end_maintenance(db: Session, window: MaintenanceWindow) -> None:
+    window.ends_at = _now()
+    db.commit()
 
 
 def acknowledge(db: Session, alert: Alert, label: str) -> Alert:

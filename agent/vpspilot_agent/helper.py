@@ -26,7 +26,18 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
-from vpspilot_agent import apperrors, backups, databases, deploy, logs, proxy, transfers
+from vpspilot_agent import (
+    apperrors,
+    appexec,
+    backups,
+    databases,
+    deploy,
+    filebackups,
+    logs,
+    proxy,
+    system,
+    transfers,
+)
 from vpspilot_agent.errors import Rejected
 
 log = logging.getLogger("vpspilot_helper")
@@ -140,6 +151,7 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     **databases.OPERATIONS,
     **logs.OPERATIONS,
     **proxy.OPERATIONS,
+    **system.OPERATIONS,
     **backups.OPERATIONS,
     **transfers.OPERATIONS,
 }
@@ -150,6 +162,9 @@ STREAMING_OPS = {
     **databases.STREAMING,
     **proxy.STREAMING,
     **backups.STREAMING,
+    **filebackups.STREAMING,
+    **appexec.STREAMING,
+    **system.STREAMING,
     **transfers.STREAMING,
 }
 

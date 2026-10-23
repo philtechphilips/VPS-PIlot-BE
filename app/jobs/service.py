@@ -27,8 +27,28 @@ RUN_TIMEOUTS = {
     "db.create": timedelta(minutes=15),
     "backup.create": timedelta(hours=3),
     "backup.restore": timedelta(hours=3),
+    "backup.files": timedelta(hours=3),
+    "backup.files_restore": timedelta(hours=3),
+    "os.upgrade": timedelta(minutes=50),
+    "app.exec": timedelta(hours=6, minutes=5),
 }
 LONGEST_TIMEOUT = max([RUN_TIMEOUT, *RUN_TIMEOUTS.values()])
+# Job types older agents don't know: refuse them with a clear message.
+NEEDS_AGENT = {
+    "backup.files": (1, 1, 4),
+    "backup.files_restore": (1, 1, 4),
+    "os.upgrade": (1, 1, 4),
+    "os.reboot": (1, 1, 4),
+    "app.exec": (1, 1, 4),
+}
+
+
+def _agent_at_least(server: Server, needed: tuple[int, ...]) -> bool:
+    try:
+        have = tuple(int(p) for p in (server.agent_version or "0").split(".")[:3])
+    except ValueError:
+        return False
+    return have >= needed
 MAX_OUTPUT = 64 * 1024
 MAX_EVENTS_PER_JOB = 500
 READ_ONLY_TYPES = {
@@ -102,6 +122,14 @@ def create(
     the idempotency key was already used for this server."""
     if server.revoked_at is not None or server.enrolled_at is None:
         raise JobError(409, "This server has no active agent")
+    needed = NEEDS_AGENT.get(job_type)
+    if needed and not _agent_at_least(server, needed):
+        raise JobError(
+            409,
+            f"{server.name}'s agent ({server.agent_version or 'unknown'}) can't do "
+            f"this yet. Upgrade it to {'.'.join(map(str, needed))} or later from "
+            "the server's page.",
+        )
     try:
         clean = types.validate(job_type, payload)
     except types.PolicyError as error:

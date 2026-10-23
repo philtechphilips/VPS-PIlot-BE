@@ -47,6 +47,8 @@ SERVICE_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$")
 RUNTIMES = ("docker", "systemd", "compose")
 HEALTH_RE = re.compile(r"^/[A-Za-z0-9._~/?=&%-]{0,199}$")
 CPUS_RE = re.compile(r"^\d{1,2}(\.\d{1,2})?$")
+# Where a Docker app keeps files between deploys (its vp-<app>-data volume).
+DATA_PATH_RE = re.compile(r"^/[A-Za-z0-9._-][A-Za-z0-9._/-]{0,198}$")
 MEMORY_RE = re.compile(r"^\d{1,6}[kmg]$")
 ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 MAX_COMMAND = 500
@@ -161,6 +163,13 @@ def validate(args: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(secret_keys, list) or not all(k in env for k in secret_keys):
         raise Rejected("invalid secret keys")
     cpus, memory = args.get("cpus"), args.get("memory")
+    data_path = args.get("data_path")
+    if data_path is not None and (
+        not isinstance(data_path, str)
+        or not DATA_PATH_RE.fullmatch(data_path)
+        or ".." in data_path.split("/")
+    ):
+        raise Rejected("invalid data folder")
     return {
         "runtime": runtime,
         "compose_file": _match(PATH_RE, compose_file, "compose file")
@@ -184,6 +193,7 @@ def validate(args: dict[str, Any]) -> dict[str, Any]:
         "memory": _match(MEMORY_RE, memory, "memory limit")
         if memory is not None
         else None,
+        "data_path": data_path,
         "env": dict(env),
         "secret_keys": list(secret_keys),
         **commands,
@@ -348,6 +358,9 @@ def _run_args(
         "--log-opt",
         "max-file=3",
     ]
+    if spec.get("data_path"):
+        # Shared by the candidate and the live container, kept across deploys.
+        cmd += ["-v", f"vp-{spec['app']}-data:{spec['data_path']}"]
     if spec["cpus"]:
         cmd += ["--cpus", spec["cpus"]]
     if spec["memory"]:
@@ -688,6 +701,7 @@ def deploy(args: dict[str, Any], emit: Emit) -> dict[str, Any]:
     env_file = None
     sha = message = method = None
     built = None  # an image this deployment built (discarded if it fails)
+    standing_in = False  # the candidate serves the domain during the swap
     try:
         if shutil.which("docker") is None:
             raise Failed("Docker isn't installed on this server")
@@ -732,11 +746,14 @@ def deploy(args: dict[str, Any], emit: Emit) -> dict[str, Any]:
             raise Failed(
                 "The new version failed its health check; the live version is unchanged"
             )
-        _remove(candidate)
+        had_live = _container_exists(live)
+        if had_live:
+            standing_in = _hand_over(candidate, live)
+        if not standing_in:
+            _remove(candidate)
 
         # 2. Swap: keep the old container (stopped) until the new one is healthy.
         say("step", f"Releasing on port {spec['host_port']}")
-        had_live = _container_exists(live)
         if had_live:
             _remove(previous)
             _run(["docker", "rename", live, previous])
@@ -802,8 +819,28 @@ def deploy(args: dict[str, Any], emit: Emit) -> dict[str, Any]:
             },
         }
     finally:
+        if standing_in:
+            _retire(candidate)
         if env_file and os.path.exists(env_file):
             os.unlink(env_file)
+
+
+def _hand_over(candidate: str, live: str) -> bool:
+    """Let the healthy candidate answer to the app's name on the private
+    network too, so the proxy reaches it while the live container is
+    replaced: requests through the app's domains never find nobody home."""
+    _run(["docker", "network", "disconnect", NETWORK, candidate], timeout=30)
+    code, _ = _run(
+        ["docker", "network", "connect", "--alias", live, NETWORK, candidate],
+        timeout=30,
+    )
+    return code == 0
+
+
+def _retire(candidate: str) -> None:
+    """Stop gracefully (finishing requests in flight), then remove."""
+    _run(["docker", "stop", "-t", "10", candidate], timeout=30)
+    _remove(candidate)
 
 
 def _deploy_other(spec: dict[str, Any], say: Emit, redact: Redactor) -> dict[str, Any]:
@@ -862,6 +899,12 @@ def remove(args: dict[str, Any], emit: Emit) -> dict[str, Any]:
             _run(["docker", "image", "rm", "-f", ref], timeout=60)
         if compose.available():
             compose.remove(app, emit)
+        if _run(["docker", "volume", "inspect", f"vp-{app}-data"], timeout=15)[0] == 0:
+            emit(
+                "info",
+                f"Kept the data volume vp-{app}-data. Remove it with "
+                f"docker volume rm vp-{app}-data when you no longer need it.",
+            )
     shutil.rmtree(os.path.join(APPS_DIR, app), ignore_errors=True)
     emit("info", f"Removed {app}")
     return {"exit_code": 0, "output": f"Removed {app}"}

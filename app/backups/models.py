@@ -35,13 +35,16 @@ class BackupSettings(Base):
 
 
 class BackupPolicy(Base):
-    """Scheduled backups of one database instance."""
+    """Scheduled backups of one database instance, or of one app's files."""
 
     __tablename__ = "backup_policies"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    instance_id: Mapped[str] = mapped_column(
+    instance_id: Mapped[str | None] = mapped_column(
         ForeignKey("database_instances.id", ondelete="CASCADE"), unique=True
+    )
+    application_id: Mapped[str | None] = mapped_column(
+        ForeignKey("applications.id", ondelete="CASCADE"), unique=True
     )
     enabled: Mapped[bool] = mapped_column(server_default=true())
     every_hours: Mapped[int] = mapped_column(server_default="24")
@@ -55,15 +58,19 @@ class BackupPolicy(Base):
 
 
 class BackupRun(Base):
-    """One backup of one database (or of a Redis instance)."""
+    """One backup of one database (or of a Redis instance), or of an app's
+    files (application_id set, database "files")."""
 
     __tablename__ = "backup_runs"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    instance_id: Mapped[str] = mapped_column(
+    instance_id: Mapped[str | None] = mapped_column(
         ForeignKey("database_instances.id", ondelete="CASCADE"), index=True
     )
-    database: Mapped[str] = mapped_column(String(63))  # "redis" for Redis
+    application_id: Mapped[str | None] = mapped_column(
+        ForeignKey("applications.id", ondelete="CASCADE"), index=True
+    )
+    database: Mapped[str] = mapped_column(String(63))  # "redis", "files"
     trigger: Mapped[str] = mapped_column(String(16))  # scheduled | manual
     status: Mapped[str] = mapped_column(String(16))  # queued|running|succeeded|failed
     job_id: Mapped[str | None] = mapped_column(String(32))

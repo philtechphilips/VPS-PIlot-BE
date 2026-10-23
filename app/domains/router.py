@@ -8,7 +8,7 @@ from app.apps.models import Application
 from app.audit import service as audit
 from app.auth.dependencies import AdminUser
 from app.core.database import DbSession
-from app.domains import service
+from app.domains import service, uptime
 from app.domains.models import Domain
 from app.jobs import service as jobs
 from app.servers.models import Server
@@ -66,6 +66,7 @@ def _out(db, d: Domain) -> dict:
         "cert_days_left": days,
         "cert_error": d.cert_error,
         "cert_checked_at": d.cert_checked_at,
+        "uptime": uptime.summary(db, d.id) if d.application_id else None,
         "created_at": d.created_at,
     }
 
@@ -144,6 +145,22 @@ def remove_domain(domain_id: str, request: Request, db: DbSession, user: AdminUs
     except service.DomainError as error:
         _raise(error)
     _audit(db, user, request, "domain.remove", host)
+
+
+@router.get("/{domain_id}/uptime")
+def domain_uptime(
+    domain_id: str,
+    db: DbSession,
+    _: AdminUser,
+    range: Literal["24h", "7d", "30d"] = "24h",  # noqa: A002 - query name
+):
+    """Uptime checks of a domain: availability and response time."""
+    domain = _get(db, domain_id)
+    app = db.get(Application, domain.application_id) if domain.application_id else None
+    return {
+        "url": uptime.url_for(domain, app),
+        **uptime.series(db, domain.id, range),
+    }
 
 
 @router.post("/{domain_id}/check")

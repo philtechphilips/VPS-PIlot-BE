@@ -1,14 +1,15 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated, Literal, NoReturn
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
+from app.apps.models import Application
 from app.audit import service as audit
 from app.auth.dependencies import AdminUser
 from app.core.database import DbSession
 from app.monitoring import service
-from app.monitoring.models import Alert, AlertRule
+from app.monitoring.models import Alert, AlertRule, MaintenanceWindow
 from app.servers import service as servers
 from app.servers.models import Server
 
@@ -33,6 +34,7 @@ class RuleOut(BaseModel):
     enabled: bool
     notify_email: bool
     server_id: str | None
+    application_id: str | None = None
     target: str = "server"
     metric: bool = False
 
@@ -43,10 +45,11 @@ class RuleCreate(BaseModel):
         Annotated[str, StringConstraints(strip_whitespace=True, max_length=100)] | None
     ) = None
     threshold: Annotated[float, Field(gt=0, le=10_000)] | None = None
-    duration_minutes: Annotated[int, Field(ge=1, le=1440)] | None = None
+    duration_minutes: Annotated[int, Field(ge=1, le=10_080)] | None = None
     severity: Severity | None = None
     notify_email: bool = True
     server_id: Annotated[str, StringConstraints(max_length=32)] | None = None
+    application_id: Annotated[str, StringConstraints(max_length=32)] | None = None
 
 
 class RuleUpdate(BaseModel):
@@ -57,7 +60,7 @@ class RuleUpdate(BaseModel):
         | None
     ) = None
     threshold: Annotated[float, Field(gt=0, le=10_000)] | None = None
-    duration_minutes: Annotated[int, Field(ge=1, le=1440)] | None = None
+    duration_minutes: Annotated[int, Field(ge=1, le=10_080)] | None = None
     severity: Severity | None = None
     enabled: bool | None = None
     notify_email: bool | None = None
@@ -81,6 +84,7 @@ class AlertOut(BaseModel):
     acknowledged_at: datetime | None
     acknowledged_by: str | None
     resolved_at: datetime | None
+    snoozed_until: datetime | None = None
 
 
 def _rule_out(rule: AlertRule) -> RuleOut:
@@ -131,7 +135,15 @@ def alerts(
     state: Literal["open", "resolved", "all"] = "open",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
 ):
-    return service.list_alerts(db, state, limit)
+    now = datetime.now(UTC)
+    out = []
+    for alert in service.list_alerts(db, state, limit):
+        row = AlertOut.model_validate(alert)
+        until = row.snoozed_until
+        if until and (until if until.tzinfo else until.replace(tzinfo=UTC)) <= now:
+            row = row.model_copy(update={"snoozed_until": None})  # snooze is over
+        out.append(row)
+    return out
 
 
 @router.post("/alerts/{alert_id}/acknowledge", response_model=AlertOut)
@@ -157,6 +169,114 @@ def acknowledge(alert_id: str, request: Request, db: DbSession, user: AdminUser)
         request=request,
     )
     return alert
+
+
+class SnoozeIn(BaseModel):
+    # None wakes the alert up again.
+    minutes: Annotated[int, Field(ge=5, le=10_080)] | None
+
+
+@router.post("/alerts/{alert_id}/snooze", response_model=AlertOut)
+def snooze(
+    alert_id: str, body: SnoozeIn, request: Request, db: DbSession, user: AdminUser
+):
+    alert = db.get(Alert, alert_id)
+    if alert is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Alert not found")
+    try:
+        alert = service.snooze(db, alert, body.minutes)
+    except service.RuleError as error:
+        _raise(error)
+    actor, label = audit.user_actor(user)
+    audit.record(
+        db,
+        action="alert.snooze",
+        result="success",
+        actor=actor,
+        actor_label=label,
+        target_type=alert.target_type,
+        target_id=alert.target_id,
+        target_label=alert.target_label,
+        detail=f"{body.minutes} min" if body.minutes else "woken up",
+        request=request,
+    )
+    return alert
+
+
+class MaintenanceIn(BaseModel):
+    server_id: Annotated[str, StringConstraints(max_length=32)] | None = None
+    application_id: Annotated[str, StringConstraints(max_length=32)] | None = None
+    minutes: Annotated[int, Field(ge=5, le=10_080)]
+    starts_at: datetime | None = None
+    reason: (
+        Annotated[str, StringConstraints(strip_whitespace=True, max_length=200)] | None
+    ) = None
+
+
+def _window_out(db, w: MaintenanceWindow) -> dict:
+    server = db.get(Server, w.server_id) if w.server_id else None
+    app = db.get(Application, w.application_id) if w.application_id else None
+    return {
+        "id": w.id,
+        "server_id": w.server_id,
+        "application_id": w.application_id,
+        "scope": app.name if app else server.name if server else "Everything",
+        "starts_at": w.starts_at,
+        "ends_at": w.ends_at,
+        "reason": w.reason,
+        "created_by": w.created_by,
+    }
+
+
+@router.get("/maintenance")
+def maintenance(db: DbSession, _: AdminUser):
+    """Maintenance windows that are on now or coming up."""
+    return [_window_out(db, w) for w in service.list_maintenance(db)]
+
+
+@router.post("/maintenance", status_code=status.HTTP_201_CREATED)
+def start_maintenance(
+    body: MaintenanceIn, request: Request, db: DbSession, user: AdminUser
+):
+    actor, label = audit.user_actor(user)
+    try:
+        window = service.start_maintenance(db, body.model_dump(), label)
+    except service.RuleError as error:
+        _raise(error)
+    out = _window_out(db, window)
+    audit.record(
+        db,
+        action="maintenance.start",
+        result="success",
+        actor=actor,
+        actor_label=label,
+        target_type="maintenance",
+        target_id=window.id,
+        target_label=out["scope"],
+        detail=f"{body.minutes} min" + (f": {body.reason}" if body.reason else ""),
+        request=request,
+    )
+    return out
+
+
+@router.delete("/maintenance/{window_id}", status_code=status.HTTP_204_NO_CONTENT)
+def end_maintenance(window_id: str, request: Request, db: DbSession, user: AdminUser):
+    window = db.get(MaintenanceWindow, window_id)
+    if window is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Maintenance window not found")
+    service.end_maintenance(db, window)
+    actor, label = audit.user_actor(user)
+    audit.record(
+        db,
+        action="maintenance.end",
+        result="success",
+        actor=actor,
+        actor_label=label,
+        target_type="maintenance",
+        target_id=window.id,
+        target_label=_window_out(db, window)["scope"],
+        request=request,
+    )
 
 
 @router.post("/evaluate")

@@ -91,6 +91,12 @@ Port = Annotated[int, Field(ge=1, le=65535)]
 HostPort = Annotated[int, Field(ge=1024, le=65535)]
 Cpus = Annotated[str, StringConstraints(pattern=r"^\d{1,2}(\.\d{1,2})?$")]
 Memory = Annotated[str, StringConstraints(pattern=r"^\d{1,6}[kmg]$")]
+# A folder inside a container (no "..", not the root).
+DataPath = Annotated[
+    str,
+    StringConstraints(pattern=r"^/[A-Za-z0-9._-][A-Za-z0-9._/-]{0,198}$"),
+    AfterValidator(_no_parent),
+]
 # A single-line shell command run inside the build/app container.
 Command = Annotated[
     str,
@@ -155,12 +161,24 @@ class AppDeployPayload(Strict):
     health_timeout: Annotated[int, Field(ge=5, le=600)] = 60
     cpus: Cpus | None = None
     memory: Memory | None = None
+    data_path: DataPath | None = None
     # The agent fetches env values for this job over its authenticated
     # channel; they are never stored in the job payload.
     has_env: bool = False
     # For repositories without a Dockerfile: override the detected commands.
     build_command: Command | None = None
     start_command: Command | None = None
+
+
+class AppExecPayload(Strict):
+    """Run a command inside the app (scheduled jobs)."""
+
+    app: AppName
+    runtime: Runtime
+    command: Command
+    timeout: Annotated[int, Field(ge=60, le=6 * 3600)] = 3600
+    service: ComposeService | None = None
+    cron_id: HexId | None = None
 
 
 class AppRemovePayload(Strict):
@@ -406,6 +424,41 @@ class BackupRestorePayload(DbJob):
     storage: BackupStorage | None = None
 
 
+class BackupFilesPayload(Strict):
+    """Pack an app's kept files (shared folder or volumes) into a backup."""
+
+    app: AppName
+    runtime: Runtime
+    application_id: HexId
+    backup_id: HexId
+    keep_local: bool = True
+    storage: BackupStorage | None = None
+    has_secrets: bool = True
+
+
+class BackupFilesRestorePayload(Strict):
+    app: AppName
+    runtime: Runtime
+    application_id: HexId
+    backup_id: HexId
+    mode: Literal["replace", "verify"]
+    path: BackupPath | None = None
+    remote_key: RemoteKey | None = None
+    sha256: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")] | None = None
+    storage: BackupStorage | None = None
+    has_secrets: bool = True
+
+
+class OsUpgradePayload(Strict):
+    """Install pending package updates: security fixes only, or all."""
+
+    mode: Literal["security", "all"]
+
+
+class OsRebootPayload(Strict):
+    pass
+
+
 class BackupDeleteItem(Strict):
     path: BackupPath | None = None
     remote_key: RemoteKey | None = None
@@ -427,6 +480,10 @@ JOB_TYPES: dict[str, type[Strict]] = {
     "backup.restore": BackupRestorePayload,
     "backup.delete": BackupDeletePayload,
     "backup.storage_test": BackupStorageTestPayload,
+    "backup.files": BackupFilesPayload,
+    "backup.files_restore": BackupFilesRestorePayload,
+    "os.upgrade": OsUpgradePayload,
+    "os.reboot": OsRebootPayload,
     "proxy.apply": ProxyApplyPayload,
     "proxy.status": ProxyStatusPayload,
     "logs.read": LogsReadPayload,
@@ -442,6 +499,7 @@ JOB_TYPES: dict[str, type[Strict]] = {
     "app.deploy": AppDeployPayload,
     "app.remove": AppRemovePayload,
     "app.logs": AppLogsPayload,
+    "app.exec": AppExecPayload,
     "service.restart": ServicePayload,
     "service.start": ServicePayload,
     "service.stop": ServicePayload,
@@ -461,6 +519,8 @@ JobType = Literal[
     "container.start",
     "container.stop",
     "container.logs",
+    "os.upgrade",
+    "os.reboot",
 ]
 
 

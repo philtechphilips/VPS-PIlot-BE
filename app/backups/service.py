@@ -1,8 +1,10 @@
-"""Backups of databases: scheduling, runs, retention, verify and restore.
+"""Backups of databases and of apps' files: scheduling, runs, retention,
+verify and restore.
 
-The agent dumps, encrypts (AES-256, key held here, encrypted at rest) and
-optionally uploads to S3-compatible storage; this module decides what runs
-when, keeps the records and prunes old backups.
+The agent dumps (or packs an app's shared folder and volumes), encrypts
+(AES-256, key held here, encrypted at rest) and optionally uploads to
+off-server storage; this module decides what runs when, keeps the records
+and prunes old backups.
 """
 
 import secrets
@@ -12,6 +14,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.apps.models import Application
 from app.backups.models import BackupPolicy, BackupRun, BackupSettings
 from app.core.security import decrypt_secret, encrypt_secret, new_id
 from app.databases import service as databases
@@ -21,6 +24,7 @@ from app.jobs.models import Job
 from app.servers.models import Server
 
 PURPOSE = "backup"
+FILES = "files"  # BackupRun.database for app file backups
 
 
 class BackupError(Exception):
@@ -206,6 +210,38 @@ def set_policy(
     return policy
 
 
+def get_app_policy(db: Session, application_id: str) -> BackupPolicy | None:
+    return db.scalar(
+        select(BackupPolicy).where(BackupPolicy.application_id == application_id)
+    )
+
+
+def set_app_policy(db: Session, app: Application, data: dict[str, Any]) -> BackupPolicy:
+    policy = get_app_policy(db, app.id)
+    if policy is None:
+        policy = BackupPolicy(
+            id=new_id(), application_id=app.id, databases=[], created_at=_now()
+        )
+        db.add(policy)
+    for field in ("enabled", "every_hours", "keep"):
+        if data.get(field) is not None:
+            setattr(policy, field, data[field])
+    if policy.enabled:
+        last = db.scalar(
+            select(BackupRun.created_at)
+            .where(BackupRun.application_id == app.id)
+            .order_by(BackupRun.created_at.desc())
+            .limit(1)
+        )
+        policy.next_run_at = (
+            (_aware(last) + timedelta(hours=policy.every_hours))
+            if last
+            else _now() + timedelta(minutes=1)
+        )
+    db.commit()
+    return policy
+
+
 def default_databases(db: Session, instance: DatabaseInstance) -> list[str]:
     if instance.engine == "redis":
         return ["redis"]
@@ -289,6 +325,98 @@ def run_backup(
     return runs
 
 
+def run_app_backup(
+    db: Session, app: Application, trigger: str, actor: str, label: str, request=None
+) -> BackupRun:
+    """Back up the files an app keeps between deploys."""
+    if app.runtime == "docker" and not app.data_path:
+        raise BackupError(
+            422,
+            "Set a data folder in the app's settings first: that's what is backed up",
+        )
+    server = db.get(Server, app.server_id)
+    row = get_settings(db)
+    storage = _storage(row)
+    run = BackupRun(
+        id=new_id(),
+        application_id=app.id,
+        database=FILES,
+        trigger=trigger,
+        status="queued",
+        created_by=label[:64],
+        created_at=_now(),
+        meta={},
+    )
+    db.add(run)
+    db.flush()
+    payload: dict[str, Any] = {
+        "app": app.name,
+        "runtime": app.runtime,
+        "application_id": app.id,
+        "backup_id": run.id,
+        "keep_local": row.keep_local,
+        "has_secrets": True,
+    }
+    if storage:
+        payload["storage"] = storage
+    try:
+        job, _ = jobs.create(
+            db, server, "backup.files", payload, actor, label, request=request
+        )
+    except jobs.JobError as error:
+        db.delete(run)
+        db.commit()
+        raise BackupError(error.status_code, error.detail) from None
+    run.job_id = job.id
+    db.commit()
+    return run
+
+
+def _app_restore_job(
+    db: Session, run: BackupRun, mode: str, actor: str, label: str, request=None
+) -> Job:
+    if mode == "new":
+        raise BackupError(422, "App files restore into the app itself")
+    app = db.get(Application, run.application_id)
+    if app is None:
+        raise BackupError(409, "The app was removed")
+    payload: dict[str, Any] = {
+        "app": app.name,
+        "runtime": app.runtime,
+        "application_id": app.id,
+        "backup_id": run.id,
+        "mode": mode,
+        "path": run.path,
+        "remote_key": run.remote_key,
+        "sha256": run.sha256,
+        "has_secrets": True,
+    }
+    storage = _storage_of(get_settings(db), run)
+    if storage and run.remote_key:
+        payload["storage"] = storage
+    try:
+        job, _ = jobs.create(
+            db,
+            db.get(Server, app.server_id),
+            "backup.files_restore",
+            payload,
+            actor,
+            label,
+            request=request,
+        )
+    except jobs.JobError as error:
+        raise BackupError(error.status_code, error.detail) from None
+    return job
+
+
+def _server_of(db: Session, run: BackupRun) -> Server | None:
+    if run.application_id:
+        app = db.get(Application, run.application_id)
+        return db.get(Server, app.server_id) if app else None
+    instance = db.get(DatabaseInstance, run.instance_id or "")
+    return db.get(Server, instance.server_id) if instance else None
+
+
 def _restore_job(
     db: Session,
     run: BackupRun,
@@ -302,6 +430,8 @@ def _restore_job(
         raise BackupError(
             409, "Only finished, kept backups can be restored or verified"
         )
+    if run.application_id:
+        return _app_restore_job(db, run, mode, actor, label, request)
     instance = db.get(DatabaseInstance, run.instance_id)
     if instance is None or instance.status != "running":
         raise BackupError(409, "The database must be running")
@@ -364,12 +494,15 @@ def restore(
 
 def delete_runs(db: Session, runs: list[BackupRun], actor: str, label: str) -> None:
     """Remove backup files (local and remote) and mark the runs deleted."""
-    by_instance: dict[str, list[BackupRun]] = {}
+    by_server: dict[str, list[BackupRun]] = {}
+    servers: dict[str, Server | None] = {}
     for run in runs:
-        by_instance.setdefault(run.instance_id, []).append(run)
-    for instance_id, items in by_instance.items():
-        instance = db.get(DatabaseInstance, instance_id)
-        server = db.get(Server, instance.server_id) if instance else None
+        server = _server_of(db, run)
+        key = server.id if server else ""
+        servers[key] = server
+        by_server.setdefault(key, []).append(run)
+    for key, items in by_server.items():
+        server = servers[key]
         row = get_settings(db)
         # One job per place the remote copies live (local files go with any).
         groups: dict[str, list[BackupRun]] = {}
@@ -395,15 +528,20 @@ def delete_runs(db: Session, runs: list[BackupRun], actor: str, label: str) -> N
     db.commit()
 
 
-def _prune(db: Session, instance_id: str, database: str) -> None:
-    policy = get_policy(db, instance_id)
+def _prune(db: Session, run: BackupRun) -> None:
+    if run.application_id:
+        policy = get_app_policy(db, run.application_id)
+        owner = BackupRun.application_id == run.application_id
+    else:
+        policy = get_policy(db, run.instance_id)
+        owner = BackupRun.instance_id == run.instance_id
     keep = policy.keep if policy else 7
     kept = list(
         db.scalars(
             select(BackupRun)
             .where(
-                BackupRun.instance_id == instance_id,
-                BackupRun.database == database,
+                owner,
+                BackupRun.database == run.database,
                 BackupRun.status == "succeeded",
                 BackupRun.deleted_at.is_(None),
             )
@@ -421,6 +559,18 @@ def run_due(db: Session) -> int:
         select(BackupPolicy).where(BackupPolicy.enabled.is_(True))
     ):
         if policy.next_run_at is None or _aware(policy.next_run_at) > _now():
+            continue
+        if policy.application_id:
+            policy.next_run_at = _now() + timedelta(hours=policy.every_hours)
+            db.commit()
+            app = db.get(Application, policy.application_id)
+            if app is None or app.current_deployment_id is None:
+                continue
+            try:
+                run_app_backup(db, app, "scheduled", "system", "Schedule")
+                started += 1
+            except BackupError:
+                continue
             continue
         instance = db.get(DatabaseInstance, policy.instance_id)
         policy.next_run_at = _now() + timedelta(hours=policy.every_hours)
@@ -441,6 +591,7 @@ def list_runs(
     instance_id: str | None = None,
     limit: int = 50,
     before: str | None = None,
+    application_id: str | None = None,
 ) -> list[BackupRun]:
     query = (
         select(BackupRun)
@@ -450,6 +601,8 @@ def list_runs(
     )
     if instance_id:
         query = query.where(BackupRun.instance_id == instance_id)
+    if application_id:
+        query = query.where(BackupRun.application_id == application_id)
     if before:
         cursor = db.get(BackupRun, before)
         if cursor is not None:
@@ -476,7 +629,7 @@ def on_job_finished(db: Session, job: Job) -> None:
         return
     ok = job.status == "succeeded"
     result = job.result or {}
-    if job.type == "backup.create":
+    if job.type in ("backup.create", "backup.files"):
         run.finished_at = _now()
         if ok:
             run.status = "succeeded"
@@ -485,11 +638,21 @@ def on_job_finished(db: Session, job: Job) -> None:
                 (result.get("storage") or "s3")[:16] if run.remote_key else None
             )
             run.size, run.sha256 = result.get("size"), result.get("sha256")
+            if result.get("files") is not None:
+                run.meta = {**(run.meta or {}), "files": result.get("files")}
             db.flush()
-            _prune(db, run.instance_id, run.database)
+            _prune(db, run)
         else:
             run.status = "failed"
             run.error = (job.error or f"Job {job.status}")[:500]
+    elif job.type == "backup.files_restore" and job.payload.get("mode") == "verify":
+        run.verified_at = _now()
+        run.verify_status = "passed" if ok else "failed"
+        run.verify_detail = (
+            f"Decrypted and read {result.get('files', 0)} files"
+            if ok
+            else (job.error or "Verification failed")
+        )[:300]
     elif job.type == "backup.restore" and job.payload.get("mode") == "verify":
         run.verified_at = _now()
         run.verify_status = "passed" if ok else "failed"

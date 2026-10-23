@@ -120,7 +120,9 @@ def render(
             upstream = site["upstream"]
             if upstream.startswith("host:"):
                 upstream = f"{gateway or '172.17.0.1'}:{upstream[5:]}"
-            lines.append(f"\treverse_proxy {upstream}")
+            # While a deploy swaps containers, a failed dial is retried
+            # (on the other container answering to the app's name).
+            lines += [f"\treverse_proxy {upstream} {{", "\t\tlb_try_duration 5s", "\t}"]
         lines += ["}", ""]
     return "\n".join(lines)
 

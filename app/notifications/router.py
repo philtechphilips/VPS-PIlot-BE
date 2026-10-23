@@ -91,7 +91,11 @@ def put_settings(body: SettingsIn, db: DbSession, user: CurrentUser):
 # ---------------------------------------------------------------------------
 
 Event = Literal[
-    "alert.firing", "alert.resolved", "deployment.failed", "deployment.succeeded"
+    "alert.firing",
+    "alert.resolved",
+    "deployment.failed",
+    "deployment.succeeded",
+    "job.failed",
 ]
 
 
@@ -107,7 +111,9 @@ class ChannelIn(BaseModel):
     kind: Literal["webhook", "slack", "telegram"]
     name: Annotated[str, StringConstraints(strip_whitespace=True, max_length=60)] = ""
     config: ChannelConfig
-    events: Annotated[list[Event], Field(max_length=4)] | None = None
+    events: Annotated[list[Event], Field(max_length=8)] | None = None
+    # Telegram: answer /status, /apps and /alerts from the chat.
+    commands: bool = False
 
 
 class ChannelUpdate(BaseModel):
@@ -116,8 +122,9 @@ class ChannelUpdate(BaseModel):
     ) = None
     # Omit to keep the stored destination (it's never sent back).
     config: ChannelConfig | None = None
-    events: Annotated[list[Event], Field(max_length=4)] | None = None
+    events: Annotated[list[Event], Field(max_length=8)] | None = None
     enabled: bool | None = None
+    commands: bool | None = None
 
 
 class ChannelOut(BaseModel):
@@ -129,6 +136,7 @@ class ChannelOut(BaseModel):
     target_label: str
     events: list[str]
     enabled: bool
+    commands: bool = False
     created_by: str
     created_at: datetime
     last_sent_at: datetime | None
@@ -169,7 +177,13 @@ def create_channel(body: ChannelIn, request: Request, db: DbSession, user: Admin
     _, label = audit.user_actor(user)
     try:
         channel, secret = channels.create(
-            db, body.kind, body.name, body.config.model_dump(), body.events, label
+            db,
+            body.kind,
+            body.name,
+            body.config.model_dump(),
+            body.events,
+            label,
+            commands=body.commands,
         )
     except channels.ChannelError as error:
         raise HTTPException(error.status_code, error.detail) from None

@@ -57,7 +57,9 @@ def update_settings(
 
 
 def _recipients(db: Session) -> list[User]:
-    return list(db.scalars(select(User).where(User.role == Role.ADMIN)))
+    return list(
+        db.scalars(select(User).where(User.role.in_((Role.ADMIN, Role.VIEWER))))
+    )
 
 
 def notify(

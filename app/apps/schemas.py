@@ -7,6 +7,7 @@ from app.jobs.types import (
     Command,
     ComposeService,
     Cpus,
+    DataPath,
     GitRef,
     GitUrl,
     HealthPath,
@@ -41,6 +42,11 @@ class ImageSourceIn(BaseModel):
     image: ImageRef
 
 
+IgnoreText = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=2, max_length=200)
+]
+
+
 class AppCreate(BaseModel):
     name: Annotated[
         str, StringConstraints(strip_whitespace=True, min_length=1, max_length=40)
@@ -63,6 +69,7 @@ class AppCreate(BaseModel):
     health_timeout_seconds: Annotated[int, Field(ge=5, le=600)] = 60
     cpu_limit: Cpus | None = None
     memory_limit: Memory | None = None
+    data_path: DataPath | None = None
     env: Annotated[list[EnvItem], Field(max_length=100)] = []
     deploy: bool = True
     # Deploy on every push to the branch (GitHub-linked apps only).
@@ -84,6 +91,10 @@ class AppUpdate(BaseModel):
     health_timeout_seconds: Annotated[int, Field(ge=5, le=600)] | None = None
     cpu_limit: Cpus | None = None
     memory_limit: Memory | None = None
+    # "" clears it (the volume and its files stay on the server).
+    data_path: DataPath | Literal[""] | None = None
+    # Error lines containing any of these aren't counted (App logging errors).
+    error_ignore: Annotated[list[IgnoreText], Field(max_length=20)] | None = None
     env: Annotated[list[EnvItem], Field(max_length=100)] | None = None
     auto_deploy: bool | None = None
 
@@ -172,6 +183,8 @@ class AppOut(BaseModel):
     health_timeout_seconds: int
     cpu_limit: str | None
     memory_limit: str | None
+    data_path: str | None
+    error_ignore: list[str] = []
     env: list[EnvOut]
     current_deployment: DeploymentOut | None
     latest_deployment: DeploymentOut | None
