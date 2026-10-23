@@ -25,8 +25,8 @@ import app.github.models  # noqa: F401
 import app.jobs.models  # noqa: F401
 import app.notifications.models  # noqa: F401
 import app.servers.models  # noqa: F401
-from app.apps.models import Application
-from app.apps.service import ENV_PURPOSE
+from app.apps.models import AppErrorMetric, Application
+from app.apps.service import ENV_PURPOSE, ERROR_PURPOSE
 from app.backups.models import BackupSettings
 from app.backups.service import PURPOSE as BACKUP_PURPOSE
 from app.core.security import encrypt_secret, reencrypt_secret
@@ -80,6 +80,11 @@ def rotate(db: Session) -> dict[str, int]:
                     row, field, reencrypt_secret(getattr(row, field), BACKUP_PURPOSE)
                 )
         counts["database"] += 1
+    for metric in db.scalars(
+        select(AppErrorMetric).where(AppErrorMetric.sample.is_not(None))
+    ):
+        metric.sample = reencrypt_secret(metric.sample, ERROR_PURPOSE)
+        counts["job_output"] += 1
     for job in db.scalars(select(Job).where(Job.output.is_not(None))):
         try:
             job.output = reencrypt_secret(job.output, OUTPUT_PURPOSE)

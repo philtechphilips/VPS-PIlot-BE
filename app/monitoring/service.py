@@ -5,7 +5,8 @@ targets. Metric rules average the samples over the rule's window, so a
 single spike never alerts, and resolve only below threshold minus a small
 hysteresis, so values hovering at the edge don't flap. Agent-offline uses
 the heartbeat age; app-down uses the agent's container inventory and must
-hold for the rule's duration. One open incident per rule and target.
+hold for the rule's duration. App-errors counts the error lines the agent
+found in each app's logs. One open incident per rule and target.
 """
 
 import logging
@@ -27,6 +28,9 @@ logger = logging.getLogger(__name__)
 OPEN = ("pending", "firing", "acknowledged")
 HYSTERESIS = 3.0  # percentage points below the threshold to resolve
 INVENTORY_FRESH = timedelta(minutes=3)
+# An app-errors alert resolves after this many windows without errors, so an
+# app failing every few minutes stays one incident instead of many.
+ERRORS_QUIET_WINDOWS = 3
 
 
 @dataclass(frozen=True)
@@ -52,6 +56,8 @@ KINDS: dict[str, Kind] = {
     "app_down": Kind(
         "Application down", "application", duration=2, severity="critical"
     ),
+    # threshold = error lines logged within the rule's duration
+    "app_errors": Kind("App logging errors", "application", threshold=1, duration=5),
     # threshold = days of validity left (Let's Encrypt domains only)
     "tls_expiring": Kind("Certificate expiring", "domain", threshold=14, duration=0),
     # threshold = hours since the last good backup (databases with a schedule)
@@ -117,6 +123,8 @@ def _check_threshold(spec: Kind, value: float | None) -> None:
         raise RuleError(422, "This rule has no threshold")
     if spec.metric and value >= 100:
         raise RuleError(422, "A percentage threshold must be below 100")
+    if not spec.metric and value < 1:
+        raise RuleError(422, "The threshold must be at least 1")
 
 
 def create_rule(db: Session, data: dict[str, Any]) -> AlertRule:
@@ -278,6 +286,25 @@ def _check_certificate(rule: AlertRule, domain, now: datetime) -> Check:
     return Check(False, round(days, 1), detail)
 
 
+def _check_errors(
+    db: Session, rule: AlertRule, app: Application, now: datetime
+) -> Check:
+    from app.apps import service as apps
+
+    window = timedelta(minutes=max(rule.duration_minutes, 1))
+    count, latest = apps.recent_errors(db, app.id, now - window)
+    if count >= rule.threshold:
+        lines = "error line" if count == 1 else "error lines"
+        detail = f"{count} {lines} in {rule.duration_minutes} min"
+        if latest:
+            detail += f". Latest: {latest[:200]}"
+        return Check(True, float(count), detail)
+    quiet, _ = apps.recent_errors(db, app.id, now - window * ERRORS_QUIET_WINDOWS)
+    if quiet == 0:
+        return Check(False, 0.0, "No errors logged")
+    return Check(None, float(count))
+
+
 def _check_app(app: Application, server: Server | None, now: datetime) -> Check:
     if server is None or app.current_deployment_id is None:
         return Check(None)  # never released: nothing should be running yet
@@ -386,6 +413,8 @@ def evaluate(db: Session, now: datetime | None = None) -> dict[str, int]:
                 check = _check_certificate(rule, target, now)
             elif rule.kind == "backup_stale":
                 check = _check_backups(db, rule, target, now)
+            elif rule.kind == "app_errors":
+                check = _check_errors(db, rule, target, now)
             elif spec.metric:
                 check = _check_metric(db, rule, target, now)
             else:

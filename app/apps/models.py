@@ -132,3 +132,28 @@ class RequestMetric(Base):
     bytes: Mapped[int] = mapped_column(BigInteger)
     p50_ms: Mapped[float] = mapped_column(Float)
     p95_ms: Mapped[float] = mapped_column(Float)
+
+
+class AppErrorMetric(Base):
+    """Error lines one app logged in one minute, with the latest one."""
+
+    __tablename__ = "app_error_metrics"
+    __table_args__ = (
+        Index(
+            "app_error_metrics_application_id_minute_idx",
+            "application_id",
+            "minute",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True
+    )
+    application_id: Mapped[str] = mapped_column(
+        ForeignKey("applications.id", ondelete="CASCADE")
+    )
+    minute: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    errors: Mapped[int]
+    # The latest error line, secrets masked by the agent; encrypted at rest.
+    sample: Mapped[str | None] = mapped_column(Text)

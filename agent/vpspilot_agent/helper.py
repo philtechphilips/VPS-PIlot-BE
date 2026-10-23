@@ -26,7 +26,7 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
-from vpspilot_agent import backups, databases, deploy, logs, proxy, transfers
+from vpspilot_agent import apperrors, backups, databases, deploy, logs, proxy, transfers
 from vpspilot_agent.errors import Rejected
 
 log = logging.getLogger("vpspilot_helper")
@@ -136,6 +136,7 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "container.logs": _container_logs,
     "docker.ps": _docker_ps,
     "app.logs": deploy.app_logs,
+    **apperrors.OPERATIONS,
     **databases.OPERATIONS,
     **logs.OPERATIONS,
     **proxy.OPERATIONS,

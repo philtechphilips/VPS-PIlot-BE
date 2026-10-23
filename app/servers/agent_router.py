@@ -267,6 +267,24 @@ def job_complete(job_id: str, body: JobCompleteRequest, agent: Agent, db: DbSess
     return {"status": job.status}
 
 
+class AppErrorRow(BaseModel):
+    app: Annotated[str, StringConstraints(max_length=40)]
+    minute: Annotated[int, Field(ge=0)]
+    errors: Annotated[int, Field(ge=0)]
+    sample: Annotated[str, StringConstraints(max_length=500)] = ""
+
+
+class AppErrorsReport(BaseModel):
+    rows: Annotated[list[AppErrorRow], Field(max_length=2000)]
+
+
+@router.post("/v1/app-errors", status_code=status.HTTP_202_ACCEPTED)
+def report_app_errors(body: AppErrorsReport, agent: Agent, db: DbSession):
+    """Error lines per app and minute from the apps' logs."""
+    stored = apps.store_app_errors(db, agent, [r.model_dump() for r in body.rows])
+    return {"stored": stored}
+
+
 # ---------------------------------------------------------------------------
 # Installer
 # ---------------------------------------------------------------------------

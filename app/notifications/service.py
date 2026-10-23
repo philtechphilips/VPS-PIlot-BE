@@ -84,9 +84,9 @@ def notify(
             )
         )
     db.execute(
-        delete(Notification).where(
-            Notification.created_at < _now() - timedelta(days=RETENTION_DAYS)
-        )
+        delete(Notification)
+        .where(Notification.created_at < _now() - timedelta(days=RETENTION_DAYS))
+        .execution_options(synchronize_session=False)
     )
     return users
 

@@ -25,6 +25,12 @@ MAX_BUFFERED_SAMPLES = 120  # ~30 minutes at the default 15 s interval
 EXIT_NOT_ENROLLED = 78  # EX_CONFIG: systemd is told not to restart on this
 
 
+def _minute_ago() -> str:
+    return (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=60)).strftime(
+        "%Y-%m-%dT%H:%M:%S.000000000Z"
+    )
+
+
 class Runner:
     def __init__(self, config: AgentConfig, client: Client | None = None):
         self.config = config
@@ -44,6 +50,8 @@ class Runner:
         self.revoked = False
         # Docker log timestamp up to which proxy access logs were counted.
         self.requests_since: str | None = None
+        # ...and up to which the apps' logs were scanned for errors.
+        self.errors_since: str | None = None
 
     def stop(self, *_: Any) -> None:
         log.info("Stopping")
@@ -69,15 +77,14 @@ class Runner:
     def send_inventory(self) -> None:
         self.client.post("/agent/v1/inventory", collectors.inventory())
         self.send_requests()
+        self.send_app_errors()
 
     def send_requests(self) -> None:
         """Per-site request counts from the proxy's access log. Optional:
         failures are logged at debug level and never back off the loop."""
         if not os.path.exists(collectors.HELPER_SOCKET):
             return
-        since = self.requests_since or (
-            dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=60)
-        ).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+        since = self.requests_since or _minute_ago()
         try:
             result = helper.call(
                 "proxy.requests", {"since": since}, collectors.HELPER_SOCKET, timeout=60
@@ -92,6 +99,27 @@ class Runner:
             raise
         except (ApiError, OSError, ValueError) as error:
             log.debug("request metrics skipped: %s", error)
+
+    def send_app_errors(self) -> None:
+        """Error lines per app from the apps' logs. Optional like the request
+        counts: an older control plane (404) or a failed scan is skipped."""
+        if not os.path.exists(collectors.HELPER_SOCKET):
+            return
+        since = self.errors_since or _minute_ago()
+        try:
+            result = helper.call(
+                "app.errors", {"since": since}, collectors.HELPER_SOCKET, timeout=60
+            )
+            if not result.get("ok"):
+                return
+            data = json.loads(result.get("output") or "{}")
+            if data.get("rows"):
+                self.client.post("/agent/v1/app-errors", {"rows": data["rows"]})
+            self.errors_since = data.get("until") or since
+        except NotEnrolled:
+            raise
+        except (ApiError, OSError, ValueError) as error:
+            log.debug("app errors skipped: %s", error)
 
     def claim_and_run(self) -> bool:
         """Run one queued job if there is one. Returns True if a job ran."""

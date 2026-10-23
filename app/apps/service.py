@@ -10,7 +10,7 @@ from typing import Any
 from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.orm import Session
 
-from app.apps.models import Application, Deployment, RequestMetric
+from app.apps.models import AppErrorMetric, Application, Deployment, RequestMetric
 from app.audit import service as audit
 from app.core.security import decrypt_secret, encrypt_secret, new_id
 from app.github import service as github
@@ -775,6 +775,64 @@ def store_requests(db: Session, server: Server, rows: list[dict[str, Any]]) -> i
     )
     db.commit()
     return stored
+
+
+ERROR_PURPOSE = "app-errors"
+
+
+def store_app_errors(db: Session, server: Server, rows: list[dict[str, Any]]) -> int:
+    """Add per-minute error counts for the server's apps (rows for names it
+    doesn't run are ignored). A minute split across two reads is merged and
+    keeps the latest error line."""
+    apps = {
+        a.name: a
+        for a in db.scalars(
+            select(Application).where(Application.server_id == server.id)
+        )
+    }
+    stored = 0
+    for row in rows:
+        app = apps.get(row["app"])
+        if app is None or row["errors"] <= 0:
+            continue
+        minute = datetime.fromtimestamp(row["minute"], UTC)
+        existing = db.scalar(
+            select(AppErrorMetric).where(
+                AppErrorMetric.application_id == app.id, AppErrorMetric.minute == minute
+            )
+        )
+        if existing is None:
+            existing = AppErrorMetric(application_id=app.id, minute=minute, errors=0)
+            db.add(existing)
+        existing.errors = (existing.errors or 0) + row["errors"]
+        if row.get("sample"):
+            existing.sample = encrypt_secret(row["sample"], ERROR_PURPOSE)
+        stored += 1
+    db.execute(
+        delete(AppErrorMetric)
+        .where(AppErrorMetric.minute < _now() - REQUEST_RETENTION)
+        .execution_options(synchronize_session=False)
+    )
+    db.commit()
+    return stored
+
+
+def recent_errors(db: Session, app_id: str, since: datetime) -> tuple[int, str | None]:
+    """Error lines an app logged since `since`, and the latest one."""
+    rows = list(
+        db.scalars(
+            select(AppErrorMetric)
+            .where(
+                AppErrorMetric.application_id == app_id,
+                AppErrorMetric.minute >= since.replace(second=0, microsecond=0),
+            )
+            .order_by(AppErrorMetric.minute)
+        )
+    )
+    latest = next((r.sample for r in reversed(rows) if r.sample), None)
+    return sum(r.errors for r in rows), (
+        decrypt_secret(latest, ERROR_PURPOSE) if latest else None
+    )
 
 
 REQUEST_RANGES = {
