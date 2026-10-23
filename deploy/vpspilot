@@ -57,7 +57,21 @@ case "${1:-status}" in
     compose up -d --remove-orphans
     install -m 0755 "$DEPLOY/vpspilot" /usr/local/bin/vpspilot
     docker exec vpspilot-proxy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1 || true
-    echo "==> Done. Upgrade agents from each server's page (or re-run their install command)."
+    # An agent enrolled on this same server picks up the new code here too.
+    if [ -f /etc/vpspilot/agent.json ]; then
+      agent_url=$(python3 -c 'import json; print(json.load(open("/etc/vpspilot/agent.json"))["api_url"])' 2>/dev/null || true)
+      if [ -n "$agent_url" ]; then
+        echo "==> Upgrading this server's agent"
+        for _ in $(seq 1 30); do
+          curl -fsS -o /dev/null "$agent_url/agent/install.sh" && break
+          sleep 2
+        done
+        if ! curl -fsSL "$agent_url/agent/install.sh" | bash; then
+          echo "    Couldn't upgrade this server's agent. Re-run its install command." >&2
+        fi
+      fi
+    fi
+    echo "==> Done. Upgrade agents on your other servers from their pages (or re-run their install command)."
     ;;
   restart)
     # Recreate (not just restart) so edits to .env take effect.
