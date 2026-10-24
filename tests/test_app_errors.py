@@ -81,12 +81,9 @@ def test_scan_counts_errors_per_app_and_minute(monkeypatch):
     assert rows[("shop", base)]["errors"] == 1
     assert rows[("shop", base)]["sample"] == "TypeError: x is undefined"
     assert rows[("shop", base + 60)]["sample"] == "ERROR db password=[redacted] refused"
-    assert rows[("api", base)] == {
-        "app": "api",
-        "minute": base,
-        "errors": 1,
-        "sample": "worker crashed",
-    }
+    api = rows[("api", base)]
+    assert (api["errors"], api["sample"]) == (1, "worker crashed")
+    assert [(g["count"], g["sample"]) for g in api["groups"]] == [(1, "worker crashed")]
     assert body["until"].endswith("Z") and body["until"] > "2026-10-01"
 
 

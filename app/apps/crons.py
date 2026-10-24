@@ -110,6 +110,47 @@ def _running(db: Session, job: AppCronJob) -> bool:
     return last is not None and last.status in ("queued", "running")
 
 
+def exec_payload(app: Application, command: str, timeout: int) -> dict[str, Any]:
+    payload = {
+        "app": app.name,
+        "runtime": app.runtime,
+        "command": command,
+        "timeout": timeout,
+    }
+    if app.runtime == "compose":
+        payload["service"] = app.compose_service or ""
+    return payload
+
+
+def run_once(
+    db: Session,
+    app: Application,
+    command: str,
+    minutes: int,
+    actor: str,
+    label: str,
+    request=None,
+) -> Job:
+    """A one-off command in the app (the Run command box)."""
+    if app.current_deployment_id is None:
+        raise CronJobError(
+            409, "Deploy the app first: commands run inside its live release"
+        )
+    try:
+        job, _ = jobs.create(
+            db,
+            db.get(Server, app.server_id),
+            "app.exec",
+            exec_payload(app, command, minutes * 60),
+            actor,
+            label,
+            request=request,
+        )
+    except jobs.JobError as error:
+        raise CronJobError(error.status_code, error.detail) from None
+    return job
+
+
 def run(db: Session, job: AppCronJob, actor: str, label: str, request=None) -> Job:
     """Start a run now (the schedule or the Run now button)."""
     app = db.get(Application, job.application_id)
@@ -120,14 +161,9 @@ def run(db: Session, job: AppCronJob, actor: str, label: str, request=None) -> J
     if _running(db, job):
         raise CronJobError(409, "The previous run is still going")
     payload = {
-        "app": app.name,
-        "runtime": app.runtime,
-        "command": job.command,
-        "timeout": job.timeout_minutes * 60,
+        **exec_payload(app, job.command, job.timeout_minutes * 60),
         "cron_id": job.id,
     }
-    if app.runtime == "compose":
-        payload["service"] = app.compose_service or ""
     try:
         queued, _ = jobs.create(
             db,

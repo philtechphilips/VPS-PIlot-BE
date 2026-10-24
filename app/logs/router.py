@@ -117,6 +117,59 @@ def request_logs(body: LogsRequest, request: Request, db: DbSession, user: Reade
     return {"job_id": job.id}
 
 
+class SearchIn(BaseModel):
+    query: Annotated[str, StringConstraints(min_length=1, max_length=200)]
+    range: Literal["1h", "24h", "7d"] = "24h"
+    # Apps to search; all apps when empty.
+    application_ids: Annotated[list[str], Field(max_length=200)] = []
+
+
+SEARCH_RANGES = {
+    "1h": timedelta(hours=1),
+    "24h": timedelta(hours=24),
+    "7d": timedelta(days=7),
+}
+
+
+@router.post("/search", status_code=status.HTTP_202_ACCEPTED)
+def search_logs(body: SearchIn, request: Request, db: DbSession, user: ReaderUser):
+    """Search the apps' logs on their servers (one job per server)."""
+    query = select(Application)
+    if body.application_ids:
+        query = query.where(Application.id.in_(body.application_ids))
+    by_server: dict[str, list[str]] = {}
+    for app in db.scalars(query):
+        by_server.setdefault(app.server_id, []).append(app.name)
+    since = (datetime.now(UTC) - SEARCH_RANGES[body.range]).strftime(
+        "%Y-%m-%dT%H:%M:%S.000000000Z"
+    )
+    actor, label = audit.user_actor(user)
+    out = []
+    for server_id, names in by_server.items():
+        server = db.get(Server, server_id)
+        if (
+            server is None
+            or server.enrolled_at is None
+            or server.revoked_at is not None
+        ):
+            continue
+        try:
+            job, _ = jobs.create(
+                db,
+                server,
+                "logs.search",
+                {"query": body.query, "since": since, "apps": names},
+                actor,
+                label,
+                request=request,
+            )
+        except jobs.JobError as error:
+            out.append({"server": server.name, "job_id": None, "error": error.detail})
+            continue
+        out.append({"server": server.name, "job_id": job.id, "error": None})
+    return {"searches": out}
+
+
 @router.get("/{job_id}")
 def read_logs(job_id: str, db: DbSession, _: AdminUser):
     jobs.reap(db)

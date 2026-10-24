@@ -43,6 +43,8 @@ class Application(Base):
     # Only used when the repository has no Dockerfile (detected builds).
     build_command: Mapped[str | None] = mapped_column(String(500))
     start_command: Mapped[str | None] = mapped_column(String(500))
+    # Run with the new version before it takes traffic (e.g. migrations).
+    release_command: Mapped[str | None] = mapped_column(String(500))
     # Compose apps: the file (found automatically when empty) and the service
     # that receives traffic (needed when there's more than one).
     compose_file: Mapped[str | None] = mapped_column(String(200))
@@ -63,9 +65,21 @@ class Application(Base):
     # Docker apps: the folder inside the container kept across deploys (the
     # vp-<app>-data volume), e.g. /app/uploads. Backed up with the app.
     data_path: Mapped[str | None] = mapped_column(String(200))
+    # Publish the host port on 127.0.0.1 only (Docker, Compose): reachable
+    # through the app's domains, not directly from the internet.
+    private_port: Mapped[bool] = mapped_column(Boolean, server_default="false")
     # Error lines containing any of these (case-insensitive) aren't counted
     # by the agent for the App logging errors rule.
     error_ignore: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # Preview deployments: each same-repo pull request gets its own copy at
+    # pr-<n>.<preview_domain>, with preview_env overriding the app's env.
+    preview_domain: Mapped[str | None] = mapped_column(String(200))
+    preview_env: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    # Set on a preview: the app it previews, and the pull request number.
+    preview_of: Mapped[str | None] = mapped_column(
+        ForeignKey("applications.id", ondelete="SET NULL"), index=True
+    )
+    preview_pr: Mapped[int | None]
 
     # [{"key": ..., "value": <encrypted>, "secret": bool}], see apps.service
     env: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
@@ -190,3 +204,76 @@ class AppCronJob(Base):
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now()
     )
+
+
+class AppUsageSample(Base):
+    """An app's CPU and memory at one moment (reported once a minute)."""
+
+    __tablename__ = "app_usage_samples"
+    __table_args__ = (
+        Index("app_usage_samples_application_id_ts_idx", "application_id", "ts"),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True
+    )
+    application_id: Mapped[str] = mapped_column(
+        ForeignKey("applications.id", ondelete="CASCADE")
+    )
+    ts: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    cpu_percent: Mapped[float] = mapped_column(Float)
+    memory_bytes: Mapped[int] = mapped_column(BigInteger)
+
+
+class ErrorGroup(Base):
+    """Error lines of one app that are the same bug (same fingerprint)."""
+
+    __tablename__ = "error_groups"
+    __table_args__ = (
+        Index(
+            "error_groups_application_id_fingerprint_idx",
+            "application_id",
+            "fingerprint",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    application_id: Mapped[str] = mapped_column(
+        ForeignKey("applications.id", ondelete="CASCADE")
+    )
+    fingerprint: Mapped[str] = mapped_column(String(16))
+    sample: Mapped[str] = mapped_column(Text)  # latest line, encrypted
+    total: Mapped[int] = mapped_column(BigInteger)
+    # {"2026-10-24": 12, ...}, the last 14 days
+    daily: Mapped[dict[str, int]] = mapped_column(JSON, default=dict)
+    first_seen: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    last_seen: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    # Ignored groups are left out by the agent (and so by alerts).
+    ignored: Mapped[bool] = mapped_column(Boolean, server_default="false")
+
+
+class AppMove(Base):
+    """Moving an app to another server (see apps.moves). The old copy keeps
+    serving until the move is finished."""
+
+    __tablename__ = "app_moves"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    application_id: Mapped[str] = mapped_column(
+        ForeignKey("applications.id", ondelete="CASCADE"), index=True
+    )
+    source_server_id: Mapped[str] = mapped_column(String(32))
+    target_server_id: Mapped[str] = mapped_column(String(32))
+    # running | waiting_dns | done | failed | canceled
+    status: Mapped[str] = mapped_column(String(16))
+    # files | databases | deploy | restore | domains | dns | finished
+    step: Mapped[str] = mapped_column(String(16))
+    include_files: Mapped[bool] = mapped_column(Boolean)
+    state: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    error: Mapped[str | None] = mapped_column(String(500))
+    created_by: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now()
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))

@@ -82,6 +82,7 @@ class Runner:
         self.client.post("/agent/v1/inventory", collectors.inventory())
         self.send_requests()
         self.send_app_errors()
+        self.send_app_usage()
 
     def send_requests(self) -> None:
         """Per-site request counts from the proxy's access log. Optional:
@@ -127,6 +128,22 @@ class Runner:
             raise
         except (ApiError, OSError, ValueError) as error:
             log.debug("app errors skipped: %s", error)
+
+    def send_app_usage(self) -> None:
+        """CPU and memory per app, once a minute. Optional like the others."""
+        if not os.path.exists(collectors.HELPER_SOCKET):
+            return
+        try:
+            result = helper.call("apps.usage", {}, collectors.HELPER_SOCKET, timeout=60)
+            if not result.get("ok"):
+                return
+            rows = json.loads(result.get("output") or "{}").get("rows")
+            if rows:
+                self.client.post("/agent/v1/app-usage", {"rows": rows})
+        except NotEnrolled:
+            raise
+        except (ApiError, OSError, ValueError) as error:
+            log.debug("app usage skipped: %s", error)
 
     def claim_and_run(self) -> bool:
         """Run one queued job if there is one. Returns True if a job ran."""

@@ -49,6 +49,7 @@ class NotificationSettings(Base):
     email_deploy_success: Mapped[bool] = mapped_column(server_default=true())
     email_deploy_failure: Mapped[bool] = mapped_column(server_default=true())
     email_alerts: Mapped[bool] = mapped_column(server_default=true())
+    email_weekly: Mapped[bool] = mapped_column(server_default=true())
 
 
 class AlertChannel(Base):

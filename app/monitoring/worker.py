@@ -33,6 +33,9 @@ def _tick() -> None:
         from app.apps import crons
 
         crons.run_due(db)
+        from app.apps import moves
+
+        moves.advance_all(db)
         from app.databases import service as databases
 
         databases.sample_due(db)
@@ -42,6 +45,9 @@ def _tick() -> None:
         from app.servers import service as servers
 
         servers.rollup_due(db)
+        from app.notifications import weekly
+
+        weekly.run_due(db)
         counts = service.evaluate(db)
         if counts["fired"] or counts["resolved"]:
             logger.info(

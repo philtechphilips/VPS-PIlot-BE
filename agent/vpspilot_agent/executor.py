@@ -48,6 +48,12 @@ SUPPORTED = {
     "os.upgrade",
     "os.reboot",
     "app.exec",
+    "disk.usage",
+    "disk.cleanup",
+    "security.check",
+    "firewall.apply",
+    "security.auto_updates",
+    "logs.search",
 }
 # Long operations that stream progress from the helper.
 STREAMING = {
@@ -62,11 +68,24 @@ STREAMING = {
     "backup.files_restore",
     "os.upgrade",
     "app.exec",
+    "disk.cleanup",
+    "firewall.apply",
+    "security.auto_updates",
     "db.export",
     "db.import",
 }
 # Read-only, frequent: no "Running ..." progress event.
-QUIET = {"app.logs", "logs.read", "db.query", "db.explore", "db.redis", "proxy.status"}
+QUIET = {
+    "app.logs",
+    "logs.read",
+    "db.query",
+    "db.explore",
+    "db.redis",
+    "proxy.status",
+    "disk.usage",
+    "security.check",
+    "logs.search",
+}
 STREAM_IDLE_TIMEOUT = 30 * 60
 MAX_OUTPUT = 256 * 1024
 MAX_EVENT = 2000

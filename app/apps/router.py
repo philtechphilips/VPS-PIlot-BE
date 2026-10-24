@@ -1,9 +1,9 @@
-from typing import Annotated, NoReturn
+from typing import Annotated, Literal, NoReturn
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from sqlalchemy import select
 
-from app.apps import service
+from app.apps import previews, service
 from app.apps.models import Application, Deployment
 from app.apps.schemas import (
     AppCreate,
@@ -69,6 +69,7 @@ def _app_out(db, app: Application) -> AppOut:
         build_context=app.build_context,
         build_command=app.build_command,
         start_command=app.start_command,
+        release_command=app.release_command,
         container_port=app.container_port,
         host_port=app.host_port,
         health_path=app.health_path,
@@ -76,7 +77,27 @@ def _app_out(db, app: Application) -> AppOut:
         cpu_limit=app.cpu_limit,
         memory_limit=app.memory_limit,
         data_path=app.data_path,
+        private_port=bool(app.private_port),
         error_ignore=app.error_ignore or [],
+        preview_domain=app.preview_domain,
+        preview_env=[
+            EnvOut(
+                key=e["key"],
+                secret=e["secret"],
+                value=None
+                if e["secret"]
+                else service.decrypt_secret(e["value"], service.ENV_PURPOSE),
+            )
+            for e in app.preview_env or []
+        ],
+        preview_of=app.preview_of,
+        preview_pr=app.preview_pr,
+        previews=[
+            {"id": p.id, "name": p.name, "pr": p.preview_pr}
+            for p in previews.list_for(db, app)
+        ]
+        if app.preview_domain
+        else [],
         env=[EnvOut(**e) for e in service.env_for_display(app)],
         current_deployment=_deployment_out(db, current, app) if current else None,
         latest_deployment=_deployment_out(db, latest, app) if latest else None,
@@ -300,6 +321,57 @@ def read_logs(app_id: str, job_id: str, db: DbSession, _: AdminUser):
         return service.read_logs(db, app, job_id)
     except service.AppError as error:
         _raise(error)
+
+
+@router.get("/applications/{app_id}/errors")
+def app_errors(app_id: str, db: DbSession, _: AdminUser):
+    """The app's errors grouped by cause, most recent first."""
+    return service.error_groups(db, _get_app(db, app_id))
+
+
+@router.post("/applications/{app_id}/errors/{group_id}/ignore")
+def ignore_error(
+    app_id: str,
+    group_id: str,
+    request: Request,
+    db: DbSession,
+    user: AdminUser,
+    ignored: bool = True,
+):
+    """Stop (or start again) counting this error for alerts."""
+    from app.apps.models import ErrorGroup
+
+    app = _get_app(db, app_id)
+    group = db.get(ErrorGroup, group_id)
+    if group is None or group.application_id != app.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Error not found")
+    group.ignored = ignored
+    db.commit()
+    actor, label = audit.user_actor(user)
+    audit.record(
+        db,
+        action="app.error_ignore",
+        result="success",
+        actor=actor,
+        actor_label=label,
+        target_type="application",
+        target_id=app.id,
+        target_label=app.name,
+        detail=f"{'ignored' if ignored else 'counted again'}: {group.fingerprint}",
+        request=request,
+    )
+    return {"ignored": group.ignored}
+
+
+@router.get("/applications/{app_id}/usage")
+def app_usage(
+    app_id: str,
+    db: DbSession,
+    _: AdminUser,
+    range: Literal["1h", "24h", "7d"] = "24h",  # noqa: A002 - query name
+):
+    """The app's CPU and memory over time."""
+    return service.usage_series(db, _get_app(db, app_id), range)
 
 
 @router.get("/applications/{app_id}/requests")

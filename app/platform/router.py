@@ -33,6 +33,14 @@ class PlatformIn(BaseModel):
         ]
         | None
     ) = None
+    weekly_report: bool | None = None
+    report_timezone: (
+        Annotated[
+            str,
+            StringConstraints(pattern=r"^[A-Za-z_]+(/[A-Za-z0-9_+-]+){0,2}$"),
+        ]
+        | None
+    ) = None
 
 
 def _schema(db) -> str | None:
@@ -55,6 +63,8 @@ def _out(db, row) -> dict:
         "schema": _schema(db),
         "updated_at": row.updated_at,
         "recovery_kit_at": row.recovery_kit_at,
+        "weekly_report": row.weekly_report,
+        "report_timezone": row.report_timezone or "UTC",
     }
 
 
@@ -65,9 +75,19 @@ def get_platform(db: DbSession, _: AdminUser):
 
 @router.put("")
 def put_platform(body: PlatformIn, request: Request, db: DbSession, user: AdminUser):
-    row = service.update(
-        db, body.name, body.public_url or None, clear_url=body.public_url == ""
-    )
+    from app.core import cron
+
+    try:
+        row = service.update(
+            db,
+            body.name,
+            body.public_url or None,
+            clear_url=body.public_url == "",
+            weekly_report=body.weekly_report,
+            report_timezone=body.report_timezone,
+        )
+    except cron.CronError as error:
+        raise HTTPException(422, str(error)) from None
     actor, label = audit.user_actor(user)
     audit.record(
         db,
@@ -82,6 +102,15 @@ def put_platform(body: PlatformIn, request: Request, db: DbSession, user: AdminU
         request=request,
     )
     return _out(db, row)
+
+
+@router.post("/weekly-report", status_code=202)
+def send_weekly_report(db: DbSession, _: AdminUser):
+    """Send this week's report now (to check what it looks like)."""
+    from app.notifications import weekly
+
+    report = weekly.send(db)
+    return {"title": report["title"], "text": weekly.as_text(report)}
 
 
 class RecoveryKitIn(BaseModel):

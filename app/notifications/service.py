@@ -49,7 +49,12 @@ def update_settings(
     db: Session, user_id: int, data: dict[str, bool]
 ) -> NotificationSettings:
     prefs = get_settings(db, user_id)
-    for key in ("email_deploy_success", "email_deploy_failure", "email_alerts"):
+    for key in (
+        "email_deploy_success",
+        "email_deploy_failure",
+        "email_alerts",
+        "email_weekly",
+    ):
         if key in data and data[key] is not None:
             setattr(prefs, key, bool(data[key]))
     db.commit()
@@ -91,6 +96,13 @@ def notify(
         .execution_options(synchronize_session=False)
     )
     return users
+
+
+def _send_report(to: str, report: dict[str, Any], url: str) -> None:
+    try:
+        emails.send_report_email(to, report, url)
+    except Exception:  # noqa: BLE001 - never let an email kill the worker
+        logger.exception("Weekly report to %s not sent", to)
 
 
 def _send(to: str, data: dict[str, Any]) -> None:

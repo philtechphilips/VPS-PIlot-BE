@@ -13,6 +13,7 @@ Text on stderr alone doesn't count: many apps log everything there.
 from __future__ import annotations
 
 import calendar
+import hashlib
 import json
 import re
 import subprocess
@@ -74,6 +75,26 @@ def is_error(message: str, priority: str | None = None) -> bool:
     return bool(ERROR_RE.search(text))
 
 
+FINGERPRINT_PARTS = (
+    (re.compile(r"^\S*\d{4}-\d{2}-\d{2}[T ][\d:.]+\S*\s*"), ""),  # leading timestamps
+    (re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F-]{27}"), "<id>"),  # UUIDs
+    (re.compile(r"\b[0-9a-fA-F]{12,}\b"), "<id>"),  # hashes, object ids
+    (re.compile(r"(['\"`])(?:(?!\1).){0,200}\1"), "<s>"),  # quoted values
+    (re.compile(r"\d+(\.\d+)?"), "<n>"),  # numbers, ports, durations
+    (re.compile(r"\s+"), " "),
+)
+MAX_GROUPS = 20  # per app and minute
+
+
+def fingerprint(message: str) -> str:
+    """The same bug gives the same fingerprint, whatever the ids, numbers
+    and quoted values in its message."""
+    text = message.strip()
+    for pattern, replacement in FINGERPRINT_PARTS:
+        text = pattern.sub(replacement, text)
+    return hashlib.sha1(text[:300].encode()).hexdigest()[:16]
+
+
 def redact(message: str) -> str:
     for pattern, replacement in SECRETS:
         message = pattern.sub(replacement, message)
@@ -131,7 +152,7 @@ def _sources() -> list[tuple[str, str, str]]:
     return found
 
 
-def _docker_lines(name: str, since: str, until: str, deadline: float):
+def _docker_lines(name: str, since: str, until: str, deadline: float, limit: int | None = MAX_LINES):
     """(epoch, message, priority) for lines logged in (since, until]."""
     proc = subprocess.Popen(
         ["docker", "logs", "--timestamps", "--since", since, "--until", until, name],
@@ -145,7 +166,7 @@ def _docker_lines(name: str, since: str, until: str, deadline: float):
     assert proc.stdout is not None
     try:
         for count, line in enumerate(proc.stdout):
-            if count >= MAX_LINES or time.monotonic() > deadline:
+            if (limit is not None and count >= limit) or time.monotonic() > deadline:
                 break
             ts, _, message = line.rstrip("\n").partition(" ")
             if not d.SINCE_RE.fullmatch(ts) or not low < d._ts_key(ts) <= high:
@@ -156,7 +177,7 @@ def _docker_lines(name: str, since: str, until: str, deadline: float):
         proc.wait()
 
 
-def _journal_lines(unit: str, since: float, until: float, deadline: float):
+def _journal_lines(unit: str, since: float, until: float, deadline: float, limit: int | None = MAX_LINES):
     proc = subprocess.Popen(
         [
             "journalctl", "-u", unit, "-o", "json", "--no-pager",
@@ -173,7 +194,7 @@ def _journal_lines(unit: str, since: float, until: float, deadline: float):
     assert proc.stdout is not None
     try:
         for count, line in enumerate(proc.stdout):
-            if count >= MAX_LINES or time.monotonic() > deadline:
+            if (limit is not None and count >= limit) or time.monotonic() > deadline:
                 break
             try:
                 row = json.loads(line)
@@ -202,9 +223,10 @@ def _ignore(value: Any) -> dict[str, list[str]]:
         if not isinstance(app, str) or not isinstance(patterns, list):
             continue
         if d.APP_RE.match(app):
+            # Plain text (substrings), and "fp:<fingerprint>" for ignored groups.
             out[app] = [
                 p.lower()
-                for p in patterns[:20]
+                for p in patterns[:200]
                 if isinstance(p, str) and 0 < len(p) <= 200
             ]
     return out
@@ -236,16 +258,71 @@ def scan(args: dict[str, Any]) -> dict[str, Any]:
             if not is_error(message, priority):
                 continue
             lowered = message.lower()
-            if any(p in lowered for p in ignore.get(app, ())):
+            skip = ignore.get(app, ())
+            if any(p in lowered for p in skip if not p.startswith("fp:")):
+                continue
+            fp = fingerprint(message)
+            if f"fp:{fp}" in skip:
                 continue
             minute = int(epoch) // 60 * 60
             row = buckets.setdefault(
-                (app, minute), {"app": app, "minute": minute, "errors": 0, "sample": ""}
+                (app, minute),
+                {"app": app, "minute": minute, "errors": 0, "sample": "", "groups": {}},
             )
             row["errors"] += 1
             row["sample"] = redact(message.strip())
+            group = row["groups"].get(fp)
+            if group is None and len(row["groups"]) < MAX_GROUPS:
+                group = row["groups"][fp] = {"fp": fp, "count": 0, "sample": row["sample"]}
+            if group is not None:
+                group["count"] += 1
     rows = sorted(buckets.values(), key=lambda r: r["minute"])[-MAX_ROWS:]
+    for row in rows:
+        row["groups"] = list(row["groups"].values())
     return {"exit_code": 0, "output": json.dumps({"until": until, "rows": rows})}
 
 
-OPERATIONS = {"app.errors": scan}
+MAX_MATCHES = 500
+
+
+def search(args: dict[str, Any]) -> dict[str, Any]:
+    """Lines containing `query` (plain text, any case) in the apps' logs since
+    `since`, newest last. Only what the server still keeps: Docker keeps 30 MB
+    per app, the journal what its settings allow."""
+    query = args.get("query")
+    if not isinstance(query, str) or not 1 <= len(query) <= 200:
+        raise Rejected("invalid query")
+    since = args.get("since")
+    if not isinstance(since, str) or not d.SINCE_RE.fullmatch(since):
+        raise Rejected("invalid since")
+    apps = args.get("apps")
+    if apps is not None and (
+        not isinstance(apps, list) or not all(isinstance(a, str) and d.APP_RE.match(a) for a in apps)
+    ):
+        raise Rejected("invalid apps")
+    needle = query.lower()
+    until_epoch = time.time()
+    since_epoch = _epoch(since)
+    deadline = time.monotonic() + MAX_SECONDS
+    matches: list[dict[str, Any]] = []
+    truncated = False
+    for app, kind, name in _sources():
+        if apps is not None and app not in apps:
+            continue
+        lines = (
+            _docker_lines(name, since, _stamp(until_epoch), deadline, limit=None)
+            if kind == "docker"
+            else _journal_lines(name, since_epoch, until_epoch, deadline, limit=None)
+        )
+        for epoch, message, _ in lines:
+            message = ANSI_RE.sub("", message)
+            if needle in message.lower():
+                matches.append({"app": app, "t": epoch, "line": redact(message.strip())})
+    matches.sort(key=lambda m: m["t"])
+    if len(matches) > MAX_MATCHES:
+        matches, truncated = matches[-MAX_MATCHES:], True
+    body = {"matches": matches, "truncated": truncated, "timed_out": time.monotonic() > deadline}
+    return {"exit_code": 0, "output": json.dumps(body), "result": {"count": len(matches)}}
+
+
+OPERATIONS = {"app.errors": scan, "logs.search": search}

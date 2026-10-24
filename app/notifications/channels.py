@@ -39,8 +39,15 @@ EVENTS = (
     "deployment.failed",
     "deployment.succeeded",
     "job.failed",
+    "report.weekly",
 )
-DEFAULT_EVENTS = ["alert.firing", "alert.resolved", "deployment.failed", "job.failed"]
+DEFAULT_EVENTS = [
+    "alert.firing",
+    "alert.resolved",
+    "deployment.failed",
+    "job.failed",
+    "report.weekly",
+]
 TIMEOUT = 10
 TELEGRAM_TOKEN_RE = re.compile(r"\d{5,12}:[A-Za-z0-9_-]{30,50}")
 TELEGRAM_CHAT_RE = re.compile(r"-?\d{1,20}|@[A-Za-z0-9_]{5,32}")
@@ -50,6 +57,7 @@ EMOJI = {
     "deployment.failed": "❌",
     "deployment.succeeded": "🚀",
     "job.failed": "⏰",
+    "report.weekly": "📊",
 }
 
 
@@ -111,10 +119,15 @@ def _post(url: str, **kwargs: Any) -> httpx.Response:
 # ---------------------------------------------------------------------------
 
 
+def _limit(event: str) -> int:
+    """Detail length: the weekly report is long, alerts aren't."""
+    return 3500 if event == "report.weekly" else 500
+
+
 def _text(event: str, data: dict[str, Any]) -> str:
     lines = [f"{EMOJI.get(event, '•')} {data['title']}"]
     if data.get("detail"):
-        lines.append(str(data["detail"])[:500])
+        lines.append(str(data["detail"])[: _limit(event)])
     if data.get("url"):
         lines.append(str(data["url"]))
     return "\n".join(lines)
@@ -135,7 +148,7 @@ def deliver(
         elif kind == "telegram":
             body = f"{EMOJI.get(event, '•')} <b>{_html_escape(data['title'])}</b>"
             if data.get("detail"):
-                body += f"\n{_html_escape(str(data['detail'])[:500])}"
+                body += f"\n{_html_escape(str(data['detail'])[: _limit(event)])}"
             if data.get("url"):
                 body += f"\n{_html_escape(str(data['url']))}"
             response = _post(

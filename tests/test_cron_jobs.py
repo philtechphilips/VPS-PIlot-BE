@@ -136,3 +136,21 @@ def test_jobs_need_a_live_release(client, admin_headers):
     )
     assert off.json()["next_run_at"] is None
     assert client.delete(f"{url}/{job['id']}", headers=admin_headers).status_code == 204
+
+
+def test_one_off_commands(client, admin_headers, db: Session):
+    agent, app = _live_app(client, admin_headers, db)
+    run = client.post(
+        f"{APPS}/{app['id']}/run",
+        json={"command": "npm run seed", "timeout_minutes": 10},
+        headers=admin_headers,
+    )
+    assert run.status_code == 202
+    job = claim(client, agent)
+    assert job["id"] == run.json()["job_id"] and job["type"] == "app.exec"
+    assert job["payload"]["command"] == "npm run seed"
+    assert job["payload"]["timeout"] == 600 and job["payload"]["cron_id"] is None
+    bad = client.post(
+        f"{APPS}/{app['id']}/run", json={"command": "a\nb"}, headers=admin_headers
+    )
+    assert bad.status_code == 422

@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import TIMESTAMP, String
+from sqlalchemy import TIMESTAMP, String, true
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -19,3 +19,7 @@ class PlatformSettings(Base):
     updated_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     # Last time someone downloaded the encryption-key recovery kit.
     recovery_kit_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    # The weekly report: on/off, the timezone for "Monday 08:00", last sent.
+    weekly_report: Mapped[bool] = mapped_column(server_default=true())
+    report_timezone: Mapped[str] = mapped_column(String(64), server_default="UTC")
+    weekly_report_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))

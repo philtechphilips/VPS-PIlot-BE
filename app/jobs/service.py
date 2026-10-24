@@ -31,6 +31,7 @@ RUN_TIMEOUTS = {
     "backup.files_restore": timedelta(hours=3),
     "os.upgrade": timedelta(minutes=50),
     "app.exec": timedelta(hours=6, minutes=5),
+    "disk.cleanup": timedelta(minutes=30),
 }
 LONGEST_TIMEOUT = max([RUN_TIMEOUT, *RUN_TIMEOUTS.values()])
 # Job types older agents don't know: refuse them with a clear message.
@@ -40,6 +41,12 @@ NEEDS_AGENT = {
     "os.upgrade": (1, 1, 4),
     "os.reboot": (1, 1, 4),
     "app.exec": (1, 1, 4),
+    "disk.usage": (1, 1, 5),
+    "disk.cleanup": (1, 1, 5),
+    "security.check": (1, 1, 5),
+    "firewall.apply": (1, 1, 5),
+    "security.auto_updates": (1, 1, 5),
+    "logs.search": (1, 1, 5),
 }
 
 
@@ -49,9 +56,14 @@ def _agent_at_least(server: Server, needed: tuple[int, ...]) -> bool:
     except ValueError:
         return False
     return have >= needed
+
+
 MAX_OUTPUT = 64 * 1024
 MAX_EVENTS_PER_JOB = 500
 READ_ONLY_TYPES = {
+    "logs.search",
+    "disk.usage",
+    "security.check",
     "app.logs",
     "logs.read",
     "db.query",
@@ -75,6 +87,17 @@ def _now() -> datetime:
 # Called with (db, job) whenever a job reaches a final state, so features that
 # own a job (deployments) can update their records. Registered at import.
 on_finished: list = []
+# Run after every on_finished hook, for workflows that chain jobs (moving an
+# app) and need the records those hooks update.
+after_finished: list = []
+
+
+def _finished(db: Session, job: Job) -> None:
+    for hook in on_finished:
+        hook(db, job)
+    db.flush()
+    for hook in after_finished:
+        hook(db, job)
 
 
 def reap(db: Session) -> None:
@@ -86,8 +109,7 @@ def reap(db: Session) -> None:
         job.status = "expired"
         job.finished_at = now
         job.error = "Not picked up in time"
-        for hook in on_finished:
-            hook(db, job)
+        _finished(db, job)
     stuck = db.scalars(
         select(Job).where(Job.status == "running", Job.claimed_at < now - RUN_TIMEOUT)
     )
@@ -102,8 +124,7 @@ def reap(db: Session) -> None:
             job.status = "failed"
             job.finished_at = now
             job.error = "Timed out on the server"
-            for hook in on_finished:
-                hook(db, job)
+            _finished(db, job)
     db.commit()
 
 
@@ -237,8 +258,7 @@ def cancel(db: Session, job: Job) -> Job:
         )
     job.status = "canceled"
     job.finished_at = _now()
-    for hook in on_finished:
-        hook(db, job)
+    _finished(db, job)
     db.commit()
     db.refresh(job)
     return job
@@ -326,8 +346,7 @@ def complete(
     )
     job.error = (error or "")[:500] or None
     job.result = result or {}
-    for hook in on_finished:
-        hook(db, job)
+    _finished(db, job)
     if job.type in READ_ONLY_TYPES:
         # Polled reads (logs, browsing): the request is audited, not every
         # completion, or the audit log would fill with refreshes.

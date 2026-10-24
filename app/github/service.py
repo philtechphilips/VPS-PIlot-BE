@@ -108,9 +108,14 @@ def manifest(db: Session, user_id: str, organization: str | None) -> dict[str, A
         "setup_url": page,
         "setup_on_update": True,
         "public": False,
-        # Read code and metadata only: enough to list, clone and get pushes.
-        "default_permissions": {"contents": "read", "metadata": "read"},
-        "default_events": ["push"] if webhook else [],
+        # Read code, metadata and pull requests only: enough to list and clone
+        # repositories, and to hear about pushes and pull requests (previews).
+        "default_permissions": {
+            "contents": "read",
+            "metadata": "read",
+            "pull_requests": "read",
+        },
+        "default_events": ["push", "pull_request"] if webhook else [],
     }
     if webhook:
         body["hook_attributes"] = {

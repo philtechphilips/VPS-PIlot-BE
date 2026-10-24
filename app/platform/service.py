@@ -19,9 +19,21 @@ def get(db: Session) -> PlatformSettings:
 
 
 def update(
-    db: Session, name: str | None, public_url: str | None, clear_url: bool = False
+    db: Session,
+    name: str | None,
+    public_url: str | None,
+    clear_url: bool = False,
+    weekly_report: bool | None = None,
+    report_timezone: str | None = None,
 ) -> PlatformSettings:
     row = get(db)
+    if weekly_report is not None:
+        row.weekly_report = weekly_report
+    if report_timezone is not None:
+        from app.core import cron
+
+        cron.timezone(report_timezone)  # raises CronError for unknown zones
+        row.report_timezone = report_timezone
     if name is not None:
         row.name = name
     if clear_url:

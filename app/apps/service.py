@@ -10,7 +10,14 @@ from typing import Any
 from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.orm import Session
 
-from app.apps.models import AppErrorMetric, Application, Deployment, RequestMetric
+from app.apps.models import (
+    AppErrorMetric,
+    Application,
+    AppUsageSample,
+    Deployment,
+    ErrorGroup,
+    RequestMetric,
+)
 from app.audit import service as audit
 from app.core.security import decrypt_secret, encrypt_secret, new_id
 from app.github import service as github
@@ -228,6 +235,7 @@ def create_app(db: Session, server: Server, data: dict[str, Any]) -> Application
         build_context=data.get("build_context") or ".",
         build_command=data.get("build_command"),
         start_command=data.get("start_command"),
+        release_command=data.get("release_command"),
         github_installation_id=linked["installation_id"] if linked else None,
         github_repo_id=linked["id"] if linked else None,
         github_repo_full_name=linked["full_name"] if linked else None,
@@ -239,6 +247,7 @@ def create_app(db: Session, server: Server, data: dict[str, Any]) -> Application
         cpu_limit=data.get("cpu_limit"),
         memory_limit=data.get("memory_limit"),
         data_path=data.get("data_path") if runtime == "docker" else None,
+        private_port=bool(data.get("private_port")) and runtime != "systemd",
         env=encode_env(data.get("env") or [], []),
     )
     db.add(app)
@@ -262,6 +271,7 @@ def update_settings(db: Session, app: Application, data: dict[str, Any]) -> Appl
         "build_context",
         "build_command",
         "start_command",
+        "release_command",
         "compose_file",
         "compose_service",
         "auto_deploy",
@@ -275,6 +285,16 @@ def update_settings(db: Session, app: Application, data: dict[str, Any]) -> Appl
             setattr(app, field, data[field])
     if "data_path" in data and app.runtime == "docker":
         app.data_path = data["data_path"] or None
+    if data.get("private_port") is not None and app.runtime != "systemd":
+        app.private_port = data["private_port"]
+    if "preview_domain" in data and data["preview_domain"] is not None:
+        if data["preview_domain"] and app.github_repo_id is None:
+            raise AppError(
+                422, "Previews need the app to be linked to a GitHub repository"
+            )
+        app.preview_domain = data["preview_domain"] or None
+    if data.get("preview_env") is not None:
+        app.preview_env = encode_env(data["preview_env"], app.preview_env or [])
     if data.get("error_ignore") is not None:
         app.error_ignore = list(dict.fromkeys(data["error_ignore"]))
     if "env" in data and data["env"] is not None:
@@ -324,9 +344,11 @@ def _payload(
         "cpus": app.cpu_limit,
         "memory": app.memory_limit,
         "data_path": app.data_path if app.runtime == "docker" else None,
+        "private_port": bool(app.private_port),
         "has_env": True,
         "build_command": app.build_command,
         "start_command": app.start_command,
+        "release_command": app.release_command,
     }
     if app.runtime == "compose":
         payload["compose_file"] = app.compose_file
@@ -642,6 +664,10 @@ def remove_app(
     db: Session, app: Application, actor: str, label: str, request=None
 ) -> None:
     """Ask the agent to remove the container, then forget the app."""
+    for preview in db.scalars(
+        select(Application).where(Application.preview_of == app.id)
+    ):
+        remove_app(db, preview, actor, f"{label} (preview of {app.name})"[:64], request)
     server = db.get(Server, app.server_id)
     if server and server.enrolled_at and not server.revoked_at:
         try:
@@ -813,6 +839,8 @@ def store_app_errors(db: Session, server: Server, rows: list[dict[str, Any]]) ->
         existing.errors = (existing.errors or 0) + row["errors"]
         if row.get("sample"):
             existing.sample = encrypt_secret(row["sample"], ERROR_PURPOSE)
+        for group in row.get("groups") or []:
+            _store_group(db, app, minute, group)
         stored += 1
     db.execute(
         delete(AppErrorMetric)
@@ -821,6 +849,91 @@ def store_app_errors(db: Session, server: Server, rows: list[dict[str, Any]]) ->
     )
     db.commit()
     return stored
+
+
+GROUP_DAYS = 14
+
+
+def _store_group(
+    db: Session, app: Application, minute: datetime, data: dict[str, Any]
+) -> None:
+    group = db.scalar(
+        select(ErrorGroup).where(
+            ErrorGroup.application_id == app.id,
+            ErrorGroup.fingerprint == data["fp"],
+        )
+    )
+    if group is None:
+        group = ErrorGroup(
+            id=new_id(),
+            application_id=app.id,
+            fingerprint=data["fp"],
+            total=0,
+            daily={},
+            first_seen=minute,
+            last_seen=minute,
+            ignored=False,
+            sample=encrypt_secret(data.get("sample") or "", ERROR_PURPOSE),
+        )
+        db.add(group)
+        db.flush()
+    group.total = (group.total or 0) + data["count"]
+    day = minute.date().isoformat()
+    daily = dict(group.daily or {})
+    daily[day] = daily.get(day, 0) + data["count"]
+    oldest = (minute - timedelta(days=GROUP_DAYS)).date().isoformat()
+    group.daily = {k: v for k, v in daily.items() if k > oldest}
+    if data.get("sample"):
+        group.sample = encrypt_secret(data["sample"], ERROR_PURPOSE)
+    last = (
+        group.last_seen
+        if group.last_seen.tzinfo
+        else group.last_seen.replace(tzinfo=UTC)
+    )
+    group.last_seen = max(last, minute)
+
+
+def error_groups(db: Session, app: Application) -> list[dict[str, Any]]:
+    now = _now()
+    days = [
+        (now - timedelta(days=i)).date().isoformat()
+        for i in range(GROUP_DAYS - 1, -1, -1)
+    ]
+    out = []
+    for group in db.scalars(
+        select(ErrorGroup)
+        .where(ErrorGroup.application_id == app.id)
+        .order_by(ErrorGroup.last_seen.desc())
+        .limit(100)
+    ):
+        daily = group.daily or {}
+        out.append(
+            {
+                "id": group.id,
+                "fingerprint": group.fingerprint,
+                "sample": decrypt_secret(group.sample, ERROR_PURPOSE)
+                if group.sample
+                else "",
+                "total": group.total,
+                "today": daily.get(days[-1], 0),
+                "days": [daily.get(d, 0) for d in days],
+                "first_seen": group.first_seen,
+                "last_seen": group.last_seen,
+                "ignored": group.ignored,
+            }
+        )
+    return out
+
+
+def ignored_fingerprints(db: Session, app_ids: list[str]) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    for app_id, fp in db.execute(
+        select(ErrorGroup.application_id, ErrorGroup.fingerprint).where(
+            ErrorGroup.application_id.in_(app_ids), ErrorGroup.ignored.is_(True)
+        )
+    ):
+        out.setdefault(app_id, []).append(f"fp:{fp}")
+    return out
 
 
 def recent_errors(db: Session, app_id: str, since: datetime) -> tuple[int, str | None]:
@@ -839,6 +952,81 @@ def recent_errors(db: Session, app_id: str, since: datetime) -> tuple[int, str |
     return sum(r.errors for r in rows), (
         decrypt_secret(latest, ERROR_PURPOSE) if latest else None
     )
+
+
+def store_usage(db: Session, server: Server, rows: list[dict[str, Any]]) -> int:
+    """CPU and memory per app on this server (rows for other names are ignored)."""
+    apps = {
+        a.name: a
+        for a in db.scalars(
+            select(Application).where(Application.server_id == server.id)
+        )
+    }
+    now = _now()
+    stored = 0
+    for row in rows:
+        app = apps.get(row["app"])
+        if app is None:
+            continue
+        db.add(
+            AppUsageSample(
+                application_id=app.id,
+                ts=now,
+                cpu_percent=row["cpu_percent"],
+                memory_bytes=row["memory_bytes"],
+            )
+        )
+        stored += 1
+    db.execute(
+        delete(AppUsageSample)
+        .where(AppUsageSample.ts < now - REQUEST_RETENTION)
+        .execution_options(synchronize_session=False)
+    )
+    db.commit()
+    return stored
+
+
+def usage_series(
+    db: Session, app: Application, range_key: str, points: int = 60
+) -> dict[str, Any]:
+    span = REQUEST_RANGES[range_key]
+    since = _now() - span
+    rows = list(
+        db.scalars(
+            select(AppUsageSample)
+            .where(AppUsageSample.application_id == app.id, AppUsageSample.ts >= since)
+            .order_by(AppUsageSample.ts)
+        )
+    )
+    step = span / points
+    buckets: list[list[AppUsageSample]] = [[] for _ in range(points)]
+    for row in rows:
+        ts = row.ts if row.ts.tzinfo else row.ts.replace(tzinfo=UTC)
+        buckets[min(points - 1, int((ts - since) / step))].append(row)
+    out = []
+    for i, bucket in enumerate(buckets):
+        out.append(
+            {
+                "ts": since + step * i,
+                "cpu_percent": round(
+                    sum(r.cpu_percent for r in bucket) / len(bucket), 2
+                )
+                if bucket
+                else None,
+                "memory_bytes": int(sum(r.memory_bytes for r in bucket) / len(bucket))
+                if bucket
+                else None,
+            }
+        )
+    latest = rows[-1] if rows else None
+    return {
+        "range": range_key,
+        "points": out,
+        "cpu_percent": latest.cpu_percent if latest else None,
+        "memory_bytes": latest.memory_bytes if latest else None,
+        "peak_memory_bytes": max((r.memory_bytes for r in rows), default=None),
+        "memory_limit": app.memory_limit,
+    }
 
 
 REQUEST_RANGES = {

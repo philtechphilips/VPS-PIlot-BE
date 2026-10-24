@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Literal, NoReturn
 
 from fastapi import APIRouter, HTTPException, Request, status
-from pydantic import BaseModel, StringConstraints
+from pydantic import BaseModel, Field, StringConstraints
 
 from app.apps.models import Application
 from app.audit import service as audit
@@ -33,6 +33,24 @@ class DomainCreate(BaseModel):
 
 class DomainUpdate(BaseModel):
     tls_mode: TlsMode
+
+
+class AccessIn(BaseModel):
+    # Password: set user + password, or password null to remove it.
+    user: Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9._@-]{1,64}$")] = (
+        "admin"
+    )
+    password: Annotated[str, StringConstraints(min_length=8, max_length=72)] | None = (
+        None
+    )
+    remove_password: bool = False
+    # IP addresses or ranges allowed in; [] lets everyone in.
+    allow: (
+        Annotated[
+            list[Annotated[str, StringConstraints(max_length=43)]], Field(max_length=50)
+        ]
+        | None
+    ) = None
 
 
 def _out(db, d: Domain) -> dict:
@@ -67,6 +85,11 @@ def _out(db, d: Domain) -> dict:
         "cert_error": d.cert_error,
         "cert_checked_at": d.cert_checked_at,
         "uptime": uptime.summary(db, d.id) if d.application_id else None,
+        "access": {
+            "user": ((d.access or {}).get("auth") or {}).get("user"),
+            "password": bool((d.access or {}).get("auth")),
+            "allow": (d.access or {}).get("allow") or [],
+        },
         "created_at": d.created_at,
     }
 
@@ -145,6 +168,34 @@ def remove_domain(domain_id: str, request: Request, db: DbSession, user: AdminUs
     except service.DomainError as error:
         _raise(error)
     _audit(db, user, request, "domain.remove", host)
+
+
+@router.put("/{domain_id}/access")
+def set_access(
+    domain_id: str, body: AccessIn, request: Request, db: DbSession, user: AdminUser
+):
+    """Password-protect a site and/or limit it to some IP addresses."""
+    domain = _get(db, domain_id)
+    data: dict = {"allow": body.allow}
+    if body.remove_password:
+        data["password"] = None
+    elif body.password:
+        data["user"], data["password"] = body.user, body.password
+    actor, label = audit.user_actor(user)
+    try:
+        service.set_access(db, domain, data, actor, label, request)
+    except service.DomainError as error:
+        _raise(error)
+    _audit(
+        db,
+        user,
+        request,
+        "domain.access",
+        domain.hostname,
+        f"password {'on' if (domain.access or {}).get('auth') else 'off'}, "
+        f"{len((domain.access or {}).get('allow') or [])} allowed ranges",
+    )
+    return _out(db, domain)
 
 
 @router.get("/{domain_id}/uptime")

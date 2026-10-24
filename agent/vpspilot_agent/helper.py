@@ -35,8 +35,10 @@ from vpspilot_agent import (
     filebackups,
     logs,
     proxy,
+    security,
     system,
     transfers,
+    usage,
 )
 from vpspilot_agent.errors import Rejected
 
@@ -152,6 +154,8 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     **logs.OPERATIONS,
     **proxy.OPERATIONS,
     **system.OPERATIONS,
+    **security.OPERATIONS,
+    **usage.OPERATIONS,
     **backups.OPERATIONS,
     **transfers.OPERATIONS,
 }
@@ -165,6 +169,8 @@ STREAMING_OPS = {
     **filebackups.STREAMING,
     **appexec.STREAMING,
     **system.STREAMING,
+    **security.STREAMING,
+    **usage.STREAMING,
     **transfers.STREAMING,
 }
 

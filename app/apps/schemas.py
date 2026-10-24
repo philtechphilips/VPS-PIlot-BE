@@ -42,6 +42,15 @@ class ImageSourceIn(BaseModel):
     image: ImageRef
 
 
+PreviewDomain = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        to_lower=True,
+        max_length=200,
+        pattern=r"^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$",
+    ),
+]
 IgnoreText = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=2, max_length=200)
 ]
@@ -63,6 +72,7 @@ class AppCreate(BaseModel):
     build_context: RelPath = "."
     build_command: Command | None = None
     start_command: Command | None = None
+    release_command: Command | None = None
     container_port: Port
     host_port: HostPort | None = None
     health_path: HealthPath = "/"
@@ -70,6 +80,7 @@ class AppCreate(BaseModel):
     cpu_limit: Cpus | None = None
     memory_limit: Memory | None = None
     data_path: DataPath | None = None
+    private_port: bool = False
     env: Annotated[list[EnvItem], Field(max_length=100)] = []
     deploy: bool = True
     # Deploy on every push to the branch (GitHub-linked apps only).
@@ -83,6 +94,7 @@ class AppUpdate(BaseModel):
     build_context: RelPath | None = None
     build_command: Command | None = None
     start_command: Command | None = None
+    release_command: Command | None = None
     compose_file: RelPath | None = None
     compose_service: ComposeService | None = None
     container_port: Port | None = None
@@ -93,8 +105,12 @@ class AppUpdate(BaseModel):
     memory_limit: Memory | None = None
     # "" clears it (the volume and its files stay on the server).
     data_path: DataPath | Literal[""] | None = None
+    private_port: bool | None = None
     # Error lines containing any of these aren't counted (App logging errors).
     error_ignore: Annotated[list[IgnoreText], Field(max_length=20)] | None = None
+    # Previews: pr-<n>.<preview_domain>; "" turns previews off.
+    preview_domain: PreviewDomain | Literal[""] | None = None
+    preview_env: Annotated[list[EnvItem], Field(max_length=50)] | None = None
     env: Annotated[list[EnvItem], Field(max_length=100)] | None = None
     auto_deploy: bool | None = None
 
@@ -175,6 +191,7 @@ class AppOut(BaseModel):
     build_context: str
     build_command: str | None
     start_command: str | None
+    release_command: str | None = None
     compose_file: str | None
     compose_service: str | None
     container_port: int
@@ -184,7 +201,13 @@ class AppOut(BaseModel):
     cpu_limit: str | None
     memory_limit: str | None
     data_path: str | None
+    private_port: bool = False
     error_ignore: list[str] = []
+    preview_domain: str | None = None
+    preview_env: list[EnvOut] = []
+    preview_of: str | None = None
+    preview_pr: int | None = None
+    previews: list[dict[str, Any]] = []
     env: list[EnvOut]
     current_deployment: DeploymentOut | None
     latest_deployment: DeploymentOut | None

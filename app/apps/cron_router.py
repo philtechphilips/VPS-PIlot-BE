@@ -97,6 +97,27 @@ def _audit(db, user, request, action: str, app: Application, job: AppCronJob) ->
     )
 
 
+class RunIn(BaseModel):
+    command: Command
+    timeout_minutes: Minutes = 30
+
+
+@router.post("/{app_id}/run", status_code=202)
+def run_command(
+    app_id: str, body: RunIn, request: Request, db: DbSession, user: AdminUser
+):
+    """Run a one-off command inside the app; poll the returned job for output."""
+    app = _app(db, app_id)
+    actor, label = audit.user_actor(user)
+    try:
+        job = crons.run_once(
+            db, app, body.command, body.timeout_minutes, actor, label, request
+        )
+    except crons.CronJobError as error:
+        _raise(error)
+    return {"job_id": job.id}
+
+
 @router.get("/{app_id}/cron", response_model=list[CronOut])
 def list_jobs(app_id: str, db: DbSession, _: AdminUser):
     return [_out(j) for j in crons.list_for(db, _app(db, app_id))]

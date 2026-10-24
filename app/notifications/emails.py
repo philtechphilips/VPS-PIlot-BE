@@ -77,6 +77,32 @@ def send_deployment_email(to: str, d: dict) -> None:
     mailer.send_email(to, subject, html, text)
 
 
+def send_report_email(to: str, report: dict, url: str) -> None:
+    body = "".join(
+        f'<div style="margin:18px 0 6px;font-family:{FONT};font-size:13px;font-weight:600;color:#ededed">{escape(heading)}</div>'
+        f'<div style="font-family:{FONT};font-size:13px;line-height:20px;color:#a1a1a1">'
+        + "<br>".join(escape(line) for line in lines)
+        + "</div>"
+        for heading, lines in report["sections"]
+    )
+    html = _layout(
+        preheader=report["title"],
+        chip="Weekly report",
+        heading=report["title"],
+        intro="What happened on your servers in the last seven days.",
+        body=f'{body}<div style="margin:26px 0 8px">{_button("Open VPSPilot", url)}</div>',
+    )
+    text = (
+        report["title"]
+        + "\n\n"
+        + "\n\n".join(
+            heading + "\n" + "\n".join(f"- {line}" for line in lines)
+            for heading, lines in report["sections"]
+        )
+    )
+    mailer.send_email(to, report["title"], html, text + f"\n\n{url}\n")
+
+
 def send_alert_email(to: str, d: dict) -> None:
     firing = d["firing"]
     if firing:

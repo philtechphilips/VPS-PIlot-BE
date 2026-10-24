@@ -162,12 +162,14 @@ class AppDeployPayload(Strict):
     cpus: Cpus | None = None
     memory: Memory | None = None
     data_path: DataPath | None = None
+    private_port: bool = False
     # The agent fetches env values for this job over its authenticated
     # channel; they are never stored in the job payload.
     has_env: bool = False
     # For repositories without a Dockerfile: override the detected commands.
     build_command: Command | None = None
     start_command: Command | None = None
+    release_command: Command | None = None
 
 
 class AppExecPayload(Strict):
@@ -346,6 +348,16 @@ ProxyHost = Annotated[
 ]
 
 
+class ProxyAuth(Strict):
+    user: Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9._@-]{1,64}$")]
+    hash: Annotated[
+        str, StringConstraints(pattern=r"^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$")
+    ]
+
+
+Cidr = Annotated[str, StringConstraints(pattern=r"^[0-9a-fA-F:.]{2,39}(/\d{1,3})?$")]
+
+
 class ProxySite(Strict):
     host: ProxyHost
     tls: Literal["auto", "internal", "off"]
@@ -359,6 +371,8 @@ class ProxySite(Strict):
         | None
     ) = None
     redirect_to: ProxyHost | None = None
+    auth: ProxyAuth | None = None
+    allow: Annotated[list[Cidr], Field(max_length=50)] | None = None
 
 
 class ProxyApplyPayload(Strict):
@@ -459,6 +473,58 @@ class OsRebootPayload(Strict):
     pass
 
 
+class DiskUsagePayload(Strict):
+    pass
+
+
+class DiskCleanupPayload(Strict):
+    """Only things nothing needs: never containers, volumes or rollback images."""
+
+    targets: Annotated[
+        list[Literal["build_cache", "dangling_images", "journal", "apt_cache"]],
+        Field(min_length=1, max_length=4),
+    ]
+
+
+class SecurityCheckPayload(Strict):
+    pass
+
+
+SourceIp = Annotated[
+    str, StringConstraints(pattern=r"^[0-9a-fA-F:.]{2,39}(/\d{1,3})?$")
+]
+
+
+class FirewallPayload(Strict):
+    """Turn ufw on (SSH, 80 and 443 allowed first), or allow/remove a port."""
+
+    action: Literal["enable", "allow", "remove"]
+    port: Annotated[int, Field(ge=1, le=65535)] | None = None
+    proto: Literal["tcp", "udp"] = "tcp"
+    source: (
+        Annotated[str, StringConstraints(pattern=r"^[0-9a-fA-F:.]{2,39}(/\d{1,3})?$")]
+        | None
+    ) = None
+
+    @model_validator(mode="after")
+    def _port_for_rules(self):
+        if self.action != "enable" and self.port is None:
+            raise ValueError("Pick a port")
+        return self
+
+
+class AutoUpdatesPayload(Strict):
+    pass
+
+
+class LogsSearchPayload(Strict):
+    """Lines containing `query` in the apps' logs (read-only)."""
+
+    query: Annotated[str, StringConstraints(min_length=1, max_length=200)]
+    since: Since
+    apps: Annotated[list[AppName], Field(max_length=200)] | None = None
+
+
 class BackupDeleteItem(Strict):
     path: BackupPath | None = None
     remote_key: RemoteKey | None = None
@@ -484,6 +550,12 @@ JOB_TYPES: dict[str, type[Strict]] = {
     "backup.files_restore": BackupFilesRestorePayload,
     "os.upgrade": OsUpgradePayload,
     "os.reboot": OsRebootPayload,
+    "disk.usage": DiskUsagePayload,
+    "disk.cleanup": DiskCleanupPayload,
+    "security.check": SecurityCheckPayload,
+    "firewall.apply": FirewallPayload,
+    "security.auto_updates": AutoUpdatesPayload,
+    "logs.search": LogsSearchPayload,
     "proxy.apply": ProxyApplyPayload,
     "proxy.status": ProxyStatusPayload,
     "logs.read": LogsReadPayload,
@@ -521,6 +593,11 @@ JobType = Literal[
     "container.logs",
     "os.upgrade",
     "os.reboot",
+    "disk.usage",
+    "disk.cleanup",
+    "security.check",
+    "firewall.apply",
+    "security.auto_updates",
 ]
 
 

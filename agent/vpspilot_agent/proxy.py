@@ -38,6 +38,35 @@ HOST_RE = re.compile(
 # vp-<app>:<port> on the private network, or host:<port> for native apps
 # (systemd) listening on the server itself.
 UPSTREAM_RE = re.compile(r"(vp-[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?|host):\d{1,5}")
+AUTH_USER_RE = re.compile(r"[A-Za-z0-9._@-]{1,64}")
+BCRYPT_RE = re.compile(r"\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}")
+
+
+def _access(site: dict[str, Any]) -> dict[str, Any]:
+    """Optional password (bcrypt hash) and IP allowlist for a site."""
+    import ipaddress
+
+    out: dict[str, Any] = {}
+    auth = site.get("auth")
+    if auth is not None:
+        if (
+            not isinstance(auth, dict)
+            or not AUTH_USER_RE.fullmatch(str(auth.get("user", "")))
+            or not BCRYPT_RE.fullmatch(str(auth.get("hash", "")))
+        ):
+            raise Rejected("invalid site password")
+        out["auth"] = {"user": auth["user"], "hash": auth["hash"]}
+    allow = site.get("allow")
+    if allow:
+        if not isinstance(allow, list) or len(allow) > 50:
+            raise Rejected("invalid allowlist")
+        try:
+            out["allow"] = [str(ipaddress.ip_network(a, strict=False)) for a in allow]
+        except (ValueError, TypeError):
+            raise Rejected("invalid allowlist") from None
+    return out
+
+
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,190}")
 
 Emit = Callable[[str, str], None]
@@ -86,7 +115,9 @@ def _sites(args: dict[str, Any]) -> list[dict[str, Any]]:
             upstream = site.get("upstream")
             if not isinstance(upstream, str) or not UPSTREAM_RE.fullmatch(upstream):
                 raise Rejected("invalid upstream")
-            clean.append({"host": host, "tls": tls, "upstream": upstream})
+            clean.append(
+                {"host": host, "tls": tls, "upstream": upstream, **_access(site)}
+            )
     return clean
 
 
@@ -116,6 +147,16 @@ def render(
             # Access log (JSON on stderr, rotated by Docker) for request
             # metrics; Caddy redacts cookies and auth headers.
             lines += ["\tlog {", "\t\toutput stderr", "\t\tformat json", "\t}"]
+            if site.get("allow"):
+                # Everyone else gets a plain 403 before anything else runs.
+                lines.append(f"\t@blocked not remote_ip {' '.join(site['allow'])}")
+                lines.append('\trespond @blocked "Forbidden" 403')
+            if site.get("auth"):
+                lines += [
+                    "\tbasic_auth {",
+                    f"\t\t{site['auth']['user']} {site['auth']['hash']}",
+                    "\t}",
+                ]
             lines.append("\tencode zstd gzip")
             upstream = site["upstream"]
             if upstream.startswith("host:"):

@@ -197,6 +197,10 @@ async def webhook(
 
         queued = apps.deploy_from_push(db, payload, request)
         return {"deployments": queued}
+    if x_github_event == "pull_request":
+        from app.apps import previews
+
+        return {"previews": previews.handle(db, payload)}
     if x_github_event == "installation" and isinstance(
         payload.get("installation"), dict
     ):

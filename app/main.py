@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.apps.cron_router import router as cron_router
+from app.apps.move_router import router as move_router
 from app.apps.router import router as apps_router
 from app.audit.router import router as audit_router
 from app.auth.router import router as auth_router
@@ -12,6 +13,7 @@ from app.backups.router import router as backups_router
 from app.core.config import settings
 from app.databases.router import router as databases_router
 from app.domains.router import router as domains_router
+from app.domains.status_router import router as status_router
 from app.github.router import router as github_router
 from app.jobs.router import router as jobs_router
 from app.logs.router import router as logs_router
@@ -58,12 +60,14 @@ app.include_router(jobs_router)
 app.include_router(audit_router)
 app.include_router(apps_router)
 app.include_router(cron_router)
+app.include_router(move_router)
 app.include_router(github_router)
 app.include_router(notifications_router)
 app.include_router(monitoring_router)
 app.include_router(databases_router)
 app.include_router(logs_router)
 app.include_router(domains_router)
+app.include_router(status_router)
 app.include_router(backups_router)
 app.include_router(platform_router)
 

@@ -141,7 +141,7 @@ def validate(args: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(timeout, int) or not 5 <= timeout <= 600:
         raise Rejected("invalid health timeout")
     commands = {}
-    for name in ("build_command", "start_command"):
+    for name in ("build_command", "start_command", "release_command"):
         value = args.get(name)
         if value is not None and (
             not isinstance(value, str)
@@ -194,6 +194,9 @@ def validate(args: dict[str, Any]) -> dict[str, Any]:
         if memory is not None
         else None,
         "data_path": data_path,
+        # Bind the host port to 127.0.0.1: reachable only through the
+        # app's domains (Docker-published ports skip the firewall).
+        "private_port": args.get("private_port") is True,
         "env": dict(env),
         "secret_keys": list(secret_keys),
         **commands,
@@ -358,9 +361,8 @@ def _run_args(
         "--log-opt",
         "max-file=3",
     ]
-    if spec.get("data_path"):
-        # Shared by the candidate and the live container, kept across deploys.
-        cmd += ["-v", f"vp-{spec['app']}-data:{spec['data_path']}"]
+    # Shared by the candidate and the live container, kept across deploys.
+    cmd += _data_mount(spec)
     if spec["cpus"]:
         cmd += ["--cpus", spec["cpus"]]
     if spec["memory"]:
@@ -722,6 +724,21 @@ def deploy(args: dict[str, Any], emit: Emit) -> dict[str, Any]:
 
         env_file = _write_env_file(workdir, spec["deployment_id"], spec["env"])
 
+        # Migrations etc.: a one-off container of the new image, before it serves.
+        if spec.get("release_command") and not (
+            source["type"] == "image" and not source["pull"]  # rollbacks
+        ):
+            run_release_command(
+                [
+                    "docker", "run", "--rm", "--network", NETWORK,
+                    "--env-file", env_file,
+                    *_data_mount(spec),
+                    "--label", f"vpspilot.app={app}",
+                    image, "sh", "-c", spec["release_command"],
+                ],
+                say,
+            )  # fmt: skip
+
         # 1. Candidate on a random loopback port: the live app is untouched.
         say("step", "Starting a candidate container")
         _remove(candidate)
@@ -758,7 +775,8 @@ def deploy(args: dict[str, Any], emit: Emit) -> dict[str, Any]:
             _remove(previous)
             _run(["docker", "rename", live, previous])
             _run(["docker", "stop", "-t", "10", previous], timeout=30)
-        publish = f"0.0.0.0:{spec['host_port']}:{spec['container_port']}"
+        host_ip = "127.0.0.1" if spec.get("private_port") else "0.0.0.0"
+        publish = f"{host_ip}:{spec['host_port']}:{spec['container_port']}"
         args_live = _run_args(spec, live, image, env_file, publish)
         args_live[2:2] = ["--restart", "unless-stopped"]
         code, out = _run(args_live)
@@ -823,6 +841,31 @@ def deploy(args: dict[str, Any], emit: Emit) -> dict[str, Any]:
             _retire(candidate)
         if env_file and os.path.exists(env_file):
             os.unlink(env_file)
+
+
+RELEASE_TIMEOUT = 15 * 60
+
+
+def _data_mount(spec: dict[str, Any]) -> list[str]:
+    if not spec.get("data_path"):
+        return []
+    return ["-v", f"vp-{spec['app']}-data:{spec['data_path']}"]
+
+
+def run_release_command(
+    cmd: list[str], say: Emit, env: dict[str, str] | None = None
+) -> None:
+    """The app's release command (migrations and the like), run with the new
+    version's code and environment before it takes traffic. Raises Failed."""
+    say("step", "Running the release command")
+    code, tail = _stream(cmd, say, RELEASE_TIMEOUT, env=env)
+    if code != 0:
+        last = next((line for line in reversed(tail) if line.strip()), "")
+        detail = f": {last[:200]}" if last else ""
+        raise Failed(
+            f"The release command failed (exit {code}){detail}. "
+            "Nothing was released; the live version is unchanged."
+        )
 
 
 def _hand_over(candidate: str, live: str) -> bool:

@@ -16,7 +16,7 @@ from tests.test_jobs import claim
 from tests.test_servers import enrolled_agent
 
 
-def _agent(db: Session, server_id: str, version: str = "1.1.4") -> None:
+def _agent(db: Session, server_id: str, version: str = "1.1.5") -> None:
     server = db.get(Server, server_id)
     server.agent_version = version
     db.commit()
@@ -469,3 +469,70 @@ def test_docker_deploys_hand_traffic_to_the_new_version(monkeypatch, tmp_path):
     retired = at(["docker", "stop", "-t", "10", "vp-shop-candidate"])
     assert joined < renamed < live < retired
     assert ["rm", "vp-shop-candidate"] in calls[retired:]
+
+
+def _fake_docker_deploy(monkeypatch, tmp_path, release_ok=True):
+    calls = []
+
+    def fake_run(cmd, timeout=60, **kwargs):
+        calls.append(cmd)
+        return 0, ""
+
+    def fake_stream(cmd, emit, timeout, cwd=None, env=None):
+        calls.append(cmd)
+        return (0, []) if release_ok else (1, ["Error: relation users does not exist"])
+
+    monkeypatch.setattr(deploy, "APPS_DIR", str(tmp_path))
+    monkeypatch.setattr(deploy.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(deploy, "_run", fake_run)
+    monkeypatch.setattr(deploy, "_stream", fake_stream)
+    for name, value in (
+        ("_check_port", lambda *a: None),
+        ("_pull", lambda *a: None),
+        ("_loopback_port", lambda *a: 32768),
+        ("_healthy", lambda *a, **k: True),
+        ("_container_exists", lambda name: True),
+        ("_prune_images", lambda *a: None),
+        ("_remove", lambda name: None),
+    ):
+        monkeypatch.setattr(deploy, name, value)
+    return calls
+
+
+def _release_spec(**extra):
+    return {
+        "app": "shop", "deployment_id": "a" * 32, "runtime": "docker",
+        "source": {"type": "image", "image": "shop:1", "pull": True},
+        "container_port": 80, "host_port": 20001, "health_path": "/",
+        "health_timeout": 30, "env": {}, "has_env": True,
+        "release_command": "npx prisma migrate deploy", **extra,
+    }  # fmt: skip
+
+
+def test_release_command_runs_before_the_new_version_serves(monkeypatch, tmp_path):
+    calls = _fake_docker_deploy(monkeypatch, tmp_path)
+    assert deploy.deploy(_release_spec(), lambda *a: None)["exit_code"] == 0
+    release = next(
+        i for i, c in enumerate(calls) if c[-1] == "npx prisma migrate deploy"
+    )
+    assert calls[release][:3] == ["docker", "run", "--rm"]
+    candidate = next(
+        i
+        for i, c in enumerate(calls)
+        if c[:2] == ["docker", "run"] and "vp-shop-candidate" in c
+    )
+    assert release < candidate
+
+    # Rollbacks re-release an image: the release command isn't run again.
+    calls.clear()
+    rollback = _release_spec(source={"type": "image", "image": "shop:1", "pull": False})
+    deploy.deploy(rollback, lambda *a: None)
+    assert not any(c[-1:] == ["npx prisma migrate deploy"] for c in calls)
+
+
+def test_a_failed_release_command_releases_nothing(monkeypatch, tmp_path):
+    calls = _fake_docker_deploy(monkeypatch, tmp_path, release_ok=False)
+    out = deploy.deploy(_release_spec(), lambda *a: None)
+    assert out["exit_code"] == 1
+    assert "release command failed (exit 1): Error: relation users" in out["error"]
+    assert not any("vp-shop-candidate" in c for c in calls)

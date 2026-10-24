@@ -112,8 +112,13 @@ def test_manifest_asks_for_read_only_access_and_push_events(
         "https://github.com/organizations/acme/settings/apps/new?state="
     )
     manifest = body["manifest"]
-    assert manifest["default_permissions"] == {"contents": "read", "metadata": "read"}
-    assert manifest["default_events"] == ["push"]
+    # Read-only everywhere: code, metadata, and pull requests for previews.
+    assert manifest["default_permissions"] == {
+        "contents": "read",
+        "metadata": "read",
+        "pull_requests": "read",
+    }
+    assert manifest["default_events"] == ["push", "pull_request"]
     assert (
         manifest["hook_attributes"]["url"]
         == "https://pilot.example.com/api/v1/github/webhook"

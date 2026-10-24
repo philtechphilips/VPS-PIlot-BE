@@ -114,8 +114,15 @@ def enroll(body: EnrollRequest, request: Request, db: DbSession):
 @router.post("/v1/heartbeat", response_model=AgentConfig)
 def heartbeat(body: HeartbeatRequest, agent: Agent, db: DbSession):
     service.heartbeat(db, agent, body.facts.model_dump(exclude_none=True))
-    apps_here = db.scalars(select(Application).where(Application.server_id == agent.id))
-    ignore = {a.name: a.error_ignore for a in apps_here if a.error_ignore}
+    apps_here = list(
+        db.scalars(select(Application).where(Application.server_id == agent.id))
+    )
+    groups = apps.ignored_fingerprints(db, [a.id for a in apps_here])
+    ignore = {
+        a.name: [*(a.error_ignore or []), *groups.get(a.id, [])]
+        for a in apps_here
+        if a.error_ignore or a.id in groups
+    }
     return _config(jobs.pending_count(db, agent), ignore)
 
 
@@ -272,11 +279,18 @@ def job_complete(job_id: str, body: JobCompleteRequest, agent: Agent, db: DbSess
     return {"status": job.status}
 
 
+class ErrorGroupRow(BaseModel):
+    fp: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{16}$")]
+    count: Annotated[int, Field(ge=0)]
+    sample: Annotated[str, StringConstraints(max_length=500)] = ""
+
+
 class AppErrorRow(BaseModel):
     app: Annotated[str, StringConstraints(max_length=40)]
     minute: Annotated[int, Field(ge=0)]
     errors: Annotated[int, Field(ge=0)]
     sample: Annotated[str, StringConstraints(max_length=500)] = ""
+    groups: Annotated[list[ErrorGroupRow], Field(max_length=20)] = []
 
 
 class AppErrorsReport(BaseModel):
@@ -287,6 +301,23 @@ class AppErrorsReport(BaseModel):
 def report_app_errors(body: AppErrorsReport, agent: Agent, db: DbSession):
     """Error lines per app and minute from the apps' logs."""
     stored = apps.store_app_errors(db, agent, [r.model_dump() for r in body.rows])
+    return {"stored": stored}
+
+
+class UsageRow(BaseModel):
+    app: Annotated[str, StringConstraints(max_length=40)]
+    cpu_percent: Annotated[float, Field(ge=0, le=100_000)]
+    memory_bytes: Annotated[int, Field(ge=0)]
+
+
+class UsageReport(BaseModel):
+    rows: Annotated[list[UsageRow], Field(max_length=500)]
+
+
+@router.post("/v1/app-usage", status_code=status.HTTP_202_ACCEPTED)
+def report_usage(body: UsageReport, agent: Agent, db: DbSession):
+    """CPU and memory per app, once a minute."""
+    stored = apps.store_usage(db, agent, [r.model_dump() for r in body.rows])
     return {"stored": stored}
 
 

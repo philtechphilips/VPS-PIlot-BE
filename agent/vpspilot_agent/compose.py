@@ -196,7 +196,7 @@ def _rewrite(
         {
             "target": spec["container_port"],
             "published": str(spec["host_port"]),
-            "host_ip": "0.0.0.0",
+            "host_ip": "127.0.0.1" if spec.get("private_port") else "0.0.0.0",
             "protocol": "tcp",
             "mode": "host",
         }
@@ -423,6 +423,24 @@ def _release(
             )
             if code != 0:
                 raise d.Failed("The image build failed")
+        if spec.get("release_command"):
+            # A one-off container of the public service (its dependencies,
+            # such as a database, are started for it).
+            d.run_release_command(
+                _compose(
+                    app,
+                    "-f",
+                    path,
+                    "run",
+                    "--rm",
+                    public,
+                    "sh",
+                    "-c",
+                    spec["release_command"],
+                ),
+                lambda level, line: emit(level, redact(line)),
+                env=_env(),
+            )
     os.utime(release)
     path = os.path.join(release, "compose.json")
     public = meta["public"]

@@ -102,10 +102,20 @@ def _acme_email(db: Session) -> str | None:
 
 
 def desired_sites(db: Session, server_id: str) -> list[dict[str, Any]]:
+    from app.apps import moves
+
     sites = []
-    for d in db.scalars(
-        select(Domain).where(Domain.server_id == server_id).order_by(Domain.hostname)
-    ):
+    here = list(
+        db.scalars(
+            select(Domain)
+            .where(Domain.server_id == server_id)
+            .order_by(Domain.hostname)
+        )
+    )
+    # An app moving here serves its domains on both servers until DNS moves.
+    known = {d.id for d in here}
+    here += [d for d in moves.moving_domains(db, server_id) if d.id not in known]
+    for d in here:
         if d.redirect_to:
             sites.append(
                 {"host": d.hostname, "tls": d.tls_mode, "redirect_to": d.redirect_to}
@@ -122,6 +132,7 @@ def desired_sites(db: Session, server_id: str) -> list[dict[str, Any]]:
                 "upstream": f"host:{app.host_port}"
                 if app.runtime == "systemd"
                 else f"vp-{app.name}:{app.container_port}",
+                **{k: v for k, v in (d.access or {}).items() if v},
             }
         )
     return sites
@@ -204,6 +215,40 @@ def update(
 ) -> Domain:
     domain.tls_mode = tls_mode
     db.flush()
+    apply(db, domain.server_id, actor, label, request)
+    return domain
+
+
+def set_access(
+    db: Session,
+    domain: Domain,
+    data: dict[str, Any],
+    actor: str,
+    label: str,
+    request=None,
+) -> Domain:
+    """Password-protect a site and/or limit it to some IP addresses."""
+    import ipaddress
+
+    import bcrypt
+
+    if domain.redirect_to:
+        raise DomainError(422, "Protect the domain it redirects to instead")
+    access = dict(domain.access or {})
+    if "password" in data:
+        if data["password"] is None:
+            access.pop("auth", None)
+        else:
+            hashed = bcrypt.hashpw(data["password"].encode(), bcrypt.gensalt(12))
+            access["auth"] = {"user": data["user"], "hash": hashed.decode()}
+    if data.get("allow") is not None:
+        try:
+            nets = [str(ipaddress.ip_network(a, strict=False)) for a in data["allow"]]
+        except ValueError as error:
+            raise DomainError(422, f"Not an IP address or range: {error}") from None
+        access["allow"] = list(dict.fromkeys(nets))
+    domain.access = access
+    db.commit()
     apply(db, domain.server_id, actor, label, request)
     return domain
 

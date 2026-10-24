@@ -166,7 +166,11 @@ def _node_bin(major: str, emit: d.Emit) -> str:
     have_local = os.path.isfile(os.path.join(local, "node"))
     system = shutil.which("node", path=SYSTEM_PATH)
     system_version = _node_version(system) if system else None
-    if not (system_version and str(system_version[0]) == major and shutil.which("npm", path=SYSTEM_PATH)):
+    if not (
+        system_version
+        and str(system_version[0]) == major
+        and shutil.which("npm", path=SYSTEM_PATH)
+    ):
         system_version = None
     arch = {"x86_64": "x64", "amd64": "x64", "aarch64": "arm64", "arm64": "arm64"}.get(
         platform.machine().lower()
@@ -180,7 +184,10 @@ def _node_bin(major: str, emit: d.Emit) -> str:
     except OSError as error:
         # Offline: keep deploying with what is here rather than failing.
         if have_local or system_version:
-            emit("warn", f"Couldn't check nodejs.org for Node.js {major} updates: {error}")
+            emit(
+                "warn",
+                f"Couldn't check nodejs.org for Node.js {major} updates: {error}",
+            )
             return local if have_local else os.path.dirname(system)
         raise d.Failed(f"Couldn't reach nodejs.org: {error}") from None
     match = re.search(
@@ -197,7 +204,10 @@ def _node_bin(major: str, emit: d.Emit) -> str:
     if have_local and _node_version(os.path.join(local, "node")) == latest:
         return local
     if system_version:
-        emit("info", f"The server's Node.js {'.'.join(map(str, system_version))} is behind {latest_text}")
+        emit(
+            "info",
+            f"The server's Node.js {'.'.join(map(str, system_version))} is behind {latest_text}",
+        )
     emit("step", f"Installing Node.js {latest_text} (nodejs.org)")
     os.makedirs(RUNTIMES, mode=0o755, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=RUNTIMES) as tmp:
@@ -213,7 +223,10 @@ def _node_bin(major: str, emit: d.Emit) -> str:
                     out.write(chunk)
         except OSError as error:
             if have_local:
-                emit("warn", f"Couldn't download Node.js {latest_text} ({error}); using the installed one")
+                emit(
+                    "warn",
+                    f"Couldn't download Node.js {latest_text} ({error}); using the installed one",
+                )
                 return local
             raise d.Failed(f"Couldn't download Node.js: {error}") from None
         if sha.hexdigest() != digest:
@@ -712,6 +725,19 @@ def _release(
     cand_env = os.path.join(d.APPS_DIR, app, f"candidate-{spec['deployment_id']}.env")
     _write_env(cand_env, {**runtime_env, "PORT": str(port)})
     try:
+        if spec.get("release_command") and spec["source"]["type"] != "release":
+            d.run_release_command(
+                [
+                    "systemd-run", "--wait", "--pipe", "--quiet", "--collect",
+                    f"--unit=vp-{app}-release",
+                    *_sandbox(user, paths, spec),
+                    "-p", f"WorkingDirectory={release}",
+                    "-p", f"EnvironmentFile={cand_env}",
+                    "/bin/sh", "-c", spec["release_command"],
+                ],
+                emit,
+                env={"PATH": SYSTEM_PATH},
+            )  # fmt: skip
         code, out = d._run(
             [
                 "systemd-run",
