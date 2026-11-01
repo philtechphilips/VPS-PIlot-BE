@@ -459,12 +459,26 @@ def _steps(plan: buildpacks.Plan, python: str) -> list[tuple[str, str]]:
         if plan.install:
             steps.append(("Installing dependencies", plan.install))
     else:
-        if plan.manager in ("pnpm", "yarn"):
+        if plan.manager == "pnpm":
+            # The project's own pnpm (see buildpacks._pnpm_version), not
+            # corepack's pick. The links are removed first: earlier agents let
+            # corepack put its own there, and npm won't overwrite them.
+            pnpm = plan.manager_version or "latest"
             steps.append(
                 (
-                    f"Enabling {plan.manager}",
-                    'corepack enable --install-directory "$HOME/.local/bin" 2>/dev/null'
-                    f' || npm install -g --prefix "$HOME/.local" {plan.manager}',
+                    f"Installing pnpm {plan.manager_version or '(latest)'}",
+                    'rm -f "$HOME/.local/bin/pnpm" "$HOME/.local/bin/pnpx"'
+                    f' && npm install -g --prefix "$HOME/.local" pnpm@{pnpm}',
+                )
+            )
+        elif plan.manager == "yarn":
+            # corepack fails outright if the install directory doesn't exist yet.
+            steps.append(
+                (
+                    "Enabling yarn",
+                    'mkdir -p "$HOME/.local/bin"'
+                    ' && corepack enable --install-directory "$HOME/.local/bin" yarn >/dev/null 2>&1'
+                    ' || npm install -g --prefix "$HOME/.local" yarn',
                 )
             )
         if plan.serve_static:
@@ -518,7 +532,10 @@ def _run_step(
     )
     os.unlink(script)
     if code != 0:
-        raise d.Failed(f"{title} failed (exit {code})")
+        reason = buildpacks.explain(tail)
+        raise d.Failed(
+            f"{title} failed (exit {code})" + (f". {reason}" if reason else "")
+        )
 
 
 def _copy_source(src: str, release: str) -> None:

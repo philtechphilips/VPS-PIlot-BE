@@ -1,7 +1,7 @@
 import json
 
 import pytest
-from vpspilot_agent import buildpacks, deploy
+from vpspilot_agent import buildpacks, deploy, native
 
 
 def make(tmp_path, files: dict[str, str]):
@@ -45,14 +45,112 @@ def test_next_with_pnpm_and_node_version(tmp_path):
         },
     )
     plan = buildpacks.plan(root)
-    assert plan.stack == "Next.js · pnpm · Node 20"
+    assert plan.stack == "Next.js · pnpm 10 · Node 20"
     assert plan.dockerfile.startswith("FROM node:20-bookworm-slim")
-    assert "RUN corepack enable" in plan.dockerfile
+    assert "corepack" not in plan.dockerfile
     assert runs(plan.dockerfile) == [
+        "npm install -g pnpm@10",
         "HUSKY=0 NODE_ENV=development pnpm install --frozen-lockfile",
         "pnpm run build",
     ]
     assert cmd_of(plan.dockerfile) == "pnpm run start"
+
+
+NEXT_APP = pkg(
+    scripts={"build": "next build", "start": "next start"}, dependencies={"next": "16"}
+)
+
+
+@pytest.mark.parametrize(
+    ("files", "version", "label"),
+    [
+        # packageManager wins, with corepack's integrity suffix dropped.
+        (
+            {
+                "package.json": pkg(
+                    packageManager="pnpm@9.15.4+sha512.abc",
+                    scripts={"start": "next start"},
+                ),
+                "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+            },
+            "9.15.4",
+            "pnpm 9",
+        ),
+        # Otherwise the lockfile format decides.
+        ({"pnpm-lock.yaml": "lockfileVersion: '9.0'\n\nsettings:\n"}, "10", "pnpm 10"),
+        ({"pnpm-lock.yaml": "lockfileVersion: '6.0'\n"}, "8", "pnpm 8"),
+        ({"pnpm-lock.yaml": "lockfileVersion: 5.4\n"}, "7", "pnpm 7"),
+        ({"pnpm-lock.yaml": "lockfileVersion: '12.0'\n"}, "", "pnpm"),
+        # pnpm 11's allowBuilds setting: the project is on 11 or later.
+        (
+            {
+                "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+                "pnpm-workspace.yaml": "allowBuilds:\n  sharp: false\n",
+            },
+            "",
+            "pnpm",
+        ),
+        # pnpm 10's setting keeps it on 10 (the syncdb case).
+        (
+            {
+                "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+                "pnpm-workspace.yaml": "ignoredBuiltDependencies:\n  - sharp\n",
+            },
+            "10",
+            "pnpm 10",
+        ),
+        # Anything but a version number in packageManager is ignored.
+        (
+            {
+                "package.json": pkg(
+                    packageManager="pnpm@10; rm -rf /", scripts={"start": "next start"}
+                ),
+                "pnpm-lock.yaml": "lockfileVersion: '6.0'\n",
+            },
+            "8",
+            "pnpm 8",
+        ),
+    ],
+)
+def test_pnpm_version_follows_the_project(tmp_path, files, version, label):
+    root = make(tmp_path, {"package.json": NEXT_APP, **files})
+    plan = buildpacks.plan(root)
+    assert plan.manager_version == version
+    assert label in plan.stack.split(" · ")
+    assert runs(plan.dockerfile)[0] == f"npm install -g pnpm@{version or 'latest'}"
+
+
+def test_pnpm_version_read_from_a_large_lockfile(tmp_path):
+    lock = "lockfileVersion: '6.0'\n" + "x" * (buildpacks.MAX_FILE + 10)
+    root = make(tmp_path, {"package.json": NEXT_APP, "pnpm-lock.yaml": lock})
+    assert buildpacks.plan(root).manager_version == "8"
+
+
+def test_native_steps_install_the_projects_pnpm(tmp_path):
+    root = make(
+        tmp_path,
+        {"package.json": NEXT_APP, "pnpm-lock.yaml": "lockfileVersion: '9.0'\n"},
+    )
+    title, command = native._steps(buildpacks.plan(root), "")[0]
+    assert title == "Installing pnpm 10"
+    assert "corepack" not in command
+    assert command.endswith('npm install -g --prefix "$HOME/.local" pnpm@10')
+
+
+def test_native_steps_create_the_corepack_directory_for_yarn(tmp_path):
+    root = make(tmp_path, {"package.json": NEXT_APP, "yarn.lock": ""})
+    title, command = native._steps(buildpacks.plan(root), "")[0]
+    assert title == "Enabling yarn"
+    assert command.startswith('mkdir -p "$HOME/.local/bin" && corepack enable')
+
+
+def test_explains_unapproved_pnpm_build_scripts():
+    tail = [
+        "Error: ERR_PNPM_IGNORED_BUILDS",
+        "  ╰─▶ Ignored build scripts: sharp@0.34.5",
+    ]
+    assert "pnpm approve-builds" in buildpacks.explain(tail)
+    assert buildpacks.explain(["npm error code E404"]) is None
 
 
 def test_express_without_scripts_uses_main(tmp_path):

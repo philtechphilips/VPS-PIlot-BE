@@ -639,7 +639,8 @@ def _build(spec: dict[str, Any], workdir: str, sha: str, emit: Emit) -> tuple[st
         # build would leave them behind on every push.
         for layer in _dangling() - before:
             _run(["docker", "image", "rm", layer], timeout=60)
-        raise Failed("The image build failed")
+        reason = buildpacks.explain(tail)
+        raise Failed("The image build failed" + (f". {reason}" if reason else ""))
     return image, method
 
 

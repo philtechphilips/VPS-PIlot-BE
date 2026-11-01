@@ -33,6 +33,14 @@ GO_DEFAULT = "1.23"
 SAFE_PATH = re.compile(r"^[A-Za-z0-9._/-]{1,200}$")
 SAFE_MODULE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]{0,200}$")
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
+SAFE_VERSION = re.compile(r"^\d{1,3}(\.\d{1,5}){0,2}(-[A-Za-z0-9.]{1,40})?$")
+
+# pnpm lockfile format (major) -> the newest pnpm that writes it. pnpm 9 and
+# 10 both write 9.0; 10 is the one to use, as it only warns about dependency
+# build scripts that haven't been approved (11 fails on them, and dropped the
+# settings 10 used to list them).
+PNPM_FOR_LOCKFILE = {"5": "7", "6": "8", "9": "10"}
+PNPM_DEFAULT = "10"
 
 DOCKERIGNORE = (
     ".git\nnode_modules\n.venv\nvenv\n__pycache__\n*.pyc\ntarget\n.next/cache\n"
@@ -52,6 +60,7 @@ class Plan:
     kind: str = ""  # node | bun | python | go | rust | static
     version: str = ""  # Node major or Python minor the project asks for
     manager: str = ""
+    manager_version: str = ""  # pnpm release to install ("" = latest)
     install: str | None = None
     build: str | None = None
     start: str = ""
@@ -87,6 +96,14 @@ class Repo:
             return None
         with open(path, encoding="utf-8", errors="replace") as handle:
             return handle.read()
+
+    def head(self, rel: str, size: int = 4096) -> str | None:
+        """The start of a file, however large (lockfiles often pass MAX_FILE)."""
+        path = self.path(rel)
+        if not path or not os.path.isfile(path):
+            return None
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            return handle.read(size)
 
     def json(self, rel: str) -> dict | None:
         text = self.read(rel)
@@ -161,6 +178,28 @@ def _node_manager(repo: Repo, pkg: dict) -> str:
     return "npm"
 
 
+def _pnpm_version(repo: Repo, pkg: dict) -> str:
+    """The pnpm release the project uses ("" means the latest).
+
+    The newest pnpm can't be assumed: pnpm 11 removed pnpm 10's settings for
+    dependency build scripts and fails the install on any it can't see
+    approved, so a pnpm 10 project breaks under it.
+    """
+    declared = str(pkg.get("packageManager") or "")
+    if declared.startswith("pnpm@"):
+        version = declared.removeprefix("pnpm@").split("+", 1)[0]
+        if SAFE_VERSION.fullmatch(version):
+            return version
+    workspace = repo.read("pnpm-workspace.yaml") or ""
+    if re.search(r"^allowBuilds\s*:", workspace, re.MULTILINE):
+        return ""  # pnpm 11's setting: the project is on 11 or later
+    lock = repo.head("pnpm-lock.yaml") or ""
+    match = re.search(r"""^lockfileVersion:\s*['"]?(\d+)""", lock, re.MULTILINE)
+    if match is None:
+        return PNPM_DEFAULT
+    return PNPM_FOR_LOCKFILE.get(match.group(1), "")
+
+
 def _node_framework(deps: dict) -> str | None:
     for dep, label in (
         ("next", "Next.js"),
@@ -203,6 +242,7 @@ def _node(
         **(pkg.get("devDependencies") or {}),
     }
     manager = _node_manager(repo, pkg)
+    manager_version = _pnpm_version(repo, pkg) if manager == "pnpm" else ""
     framework = _node_framework(deps)
     run = {"npm": "npm run", "pnpm": "pnpm run", "yarn": "yarn run", "bun": "bun run"}[
         manager
@@ -314,7 +354,10 @@ def _node(
         "WORKDIR /app",
         "ENV HOST=0.0.0.0 HOSTNAME=0.0.0.0 NEXT_TELEMETRY_DISABLED=1 NUXT_TELEMETRY_DISABLED=1",
     ]
-    if manager in ("pnpm", "yarn"):
+    if manager == "pnpm":
+        pnpm = manager_version or "latest"
+        lines.append(f"RUN {_sh(f'npm install -g pnpm@{pnpm}')}")
+    elif manager == "yarn":
         lines.append("RUN corepack enable")
     if serve_static:
         lines.append(f"RUN {_sh('npm install -g serve@14')}")
@@ -325,17 +368,19 @@ def _node(
         text += f"RUN {_sh(build_cmd)}\n"
     text += "ENV NODE_ENV=production\n"
     text += f"CMD {_sh(start_cmd)}\n"
-    label = " · ".join(
-        x
-        for x in (framework, manager if manager != "bun" else None, version_label)
-        if x
+    shown = (
+        None
+        if manager == "bun"
+        else " ".join(filter(None, (manager, manager_version.split(".")[0])))
     )
+    label = " · ".join(x for x in (framework, shown, version_label) if x)
     return Plan(
         stack=label,
         dockerfile=text,
         kind="bun" if manager == "bun" else "node",
         version=version_label.removeprefix("Node "),
         manager=manager,
+        manager_version=manager_version,
         install=install,
         build=build_cmd,
         start=start_cmd,
@@ -665,6 +710,18 @@ def plan(
         "No Dockerfile, and this doesn't look like a Node.js, Bun, Python, Go, Rust or static "
         f"site project (found: {found}). Add a Dockerfile or deploy a container image."
     )
+
+
+def explain(tail: list[str]) -> str | None:
+    """What to do about a known install failure, from the build's last lines."""
+    text = "\n".join(tail)
+    if "ERR_PNPM_IGNORED_BUILDS" in text:
+        return (
+            "pnpm stopped because some dependencies have build scripts that "
+            "haven't been approved. Run `pnpm approve-builds` in the project, "
+            "commit pnpm-workspace.yaml and deploy again"
+        )
+    return None
 
 
 def write_dockerignore(root: str) -> None:
