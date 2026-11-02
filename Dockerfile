@@ -1,5 +1,5 @@
 # VPSPilot API (control plane). Built by deploy/compose.yaml.
-FROM python:3.12-slim
+FROM python:3.15-slim
 # UV_NO_CACHE: uv's download cache would otherwise ship in the image (~120 MB).
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy \
     UV_NO_CACHE=1
