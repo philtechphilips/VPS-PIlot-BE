@@ -31,7 +31,12 @@ jobs:
       - name: The agent still parses on Ubuntu 22.04's Python 3.10
         run: uv run ruff check --target-version py310 --select E9 agent
       - name: Test
-        run: uv run pytest -q
+        shell: bash # -o pipefail: the step fails when pytest does
+        run: uv run pytest -q -rfE | tee pytest.log
+      # Failing tests on the run's summary page and the pull request, without opening the log.
+      - name: List failing tests
+        if: ${{ failure() && hashFiles('pytest.log') != '' }}
+        run: sed -nE 's/^(FAILED|ERROR) (.*)/::error title=\1::\2/p' pytest.log
 
   trivy:
     name: Trivy

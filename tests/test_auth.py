@@ -217,7 +217,9 @@ def test_refresh_rotates_cookie(client, db: Session, outbox):
     new_cookie = client.cookies.get(settings.refresh_cookie_name)
     assert new_cookie and new_cookie != old_cookie
 
-    # The old refresh token is dead after rotation.
+    # The old refresh token is dead after rotation. Clear first: with two
+    # cookies of the same name, which one is sent depends on the httpx version.
+    client.cookies.clear()
     client.cookies.set(settings.refresh_cookie_name, old_cookie, path=AUTH)
     assert client.post(f"{AUTH}/refresh").status_code == 401
 
