@@ -41,6 +41,7 @@ class PlatformIn(BaseModel):
         ]
         | None
     ) = None
+    vuln_checks: bool | None = None
 
 
 def _schema(db) -> str | None:
@@ -65,6 +66,7 @@ def _out(db, row) -> dict:
         "recovery_kit_at": row.recovery_kit_at,
         "weekly_report": row.weekly_report,
         "report_timezone": row.report_timezone or "UTC",
+        "vuln_checks": row.vuln_checks,
     }
 
 
@@ -85,6 +87,7 @@ def put_platform(body: PlatformIn, request: Request, db: DbSession, user: AdminU
             clear_url=body.public_url == "",
             weekly_report=body.weekly_report,
             report_timezone=body.report_timezone,
+            vuln_checks=body.vuln_checks,
         )
     except cron.CronError as error:
         raise HTTPException(422, str(error)) from None
@@ -98,7 +101,8 @@ def put_platform(body: PlatformIn, request: Request, db: DbSession, user: AdminU
         target_type="platform",
         target_id="1",
         target_label=row.name,
-        detail=f"public URL {row.public_url or 'unset'}",
+        detail=f"public URL {row.public_url or 'unset'}, vulnerability lookups "
+        f"{'on' if row.vuln_checks else 'off'}",
         request=request,
     )
     return _out(db, row)

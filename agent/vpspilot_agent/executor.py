@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -54,6 +55,7 @@ SUPPORTED = {
     "firewall.apply",
     "security.auto_updates",
     "logs.search",
+    "apps.audit",
 }
 # Long operations that stream progress from the helper.
 STREAMING = {
@@ -85,8 +87,10 @@ QUIET = {
     "disk.usage",
     "security.check",
     "logs.search",
+    "apps.audit",
 }
 STREAM_IDLE_TIMEOUT = 30 * 60
+AUDIT_TIMEOUT = 15 * 60
 MAX_OUTPUT = 256 * 1024
 MAX_EVENT = 2000
 FLUSH_SECONDS = 2.0
@@ -197,17 +201,46 @@ def run_job(client: Client, job: dict[str, Any], call: HelperCall = helper.call)
             {"events": [{"level": "info", "message": f"Running {job_type}"}]},
         )
     try:
-        result = call(job_type, args)
+        if job_type == "apps.audit":
+            result = call(job_type, args, timeout=AUDIT_TIMEOUT)
+        else:
+            result = call(job_type, args)
     except OSError as error:
         return finish(False, None, "", f"Privileged helper unavailable: {error}")
     if "error" in result and "exit_code" not in result:
         return finish(False, None, "", result["error"])
+    if job_type == "apps.audit" and result.get("ok"):
+        return _report_audit(client, job_id, result, finish)
     return finish(
         bool(result.get("ok")),
         result.get("exit_code"),
         result.get("output", ""),
         None if result.get("ok") else (result.get("error") or "Command failed"),
     )
+
+
+def _report_audit(client: Client, job_id: str, result: dict[str, Any], finish) -> str:
+    """Package lists are too big for a job result: each app's goes to its
+    own endpoint, and the job keeps a one-line summary."""
+    try:
+        apps = json.loads(result.get("output") or "{}").get("apps") or []
+    except ValueError:
+        return finish(False, None, "", "The helper returned an unreadable scan")
+    sent = packages = 0
+    errors = []
+    for row in apps:
+        if row.get("error"):
+            errors.append(f"{row.get('app')}: {row['error']}")
+            continue
+        client.post("/agent/v1/app-packages", {"job_id": job_id, **row})
+        sent += 1
+        packages += len(row.get("packages") or []) + len(
+            (row.get("os") or {}).get("packages") or []
+        )
+    summary = f"Scanned {sent} app{'s' if sent != 1 else ''}: {packages} packages"
+    if errors:
+        summary += "\n" + "\n".join(errors)
+    return finish(True, 0, summary, None)
 
 
 def _run_streaming(

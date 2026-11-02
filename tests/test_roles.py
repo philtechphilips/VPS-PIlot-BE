@@ -10,9 +10,9 @@ def test_get_me(client, user_headers):
 
 
 def test_list_users_is_admin_only(client, user_headers, admin_headers):
-    assert client.get(f"{USERS}/", headers=user_headers).status_code == 403
+    assert client.get(USERS, headers=user_headers).status_code == 403
 
-    response = client.get(f"{USERS}/", headers=admin_headers)
+    response = client.get(USERS, headers=admin_headers)
     assert response.status_code == 200
     assert {u["email"] for u in response.json()} == {
         "alice@example.com",
@@ -42,7 +42,7 @@ def test_admin_can_promote_user(client, db: Session, outbox, admin_headers):
 
     # The change applies straight away, without a new token
     bob_headers = sign_in(client, outbox, "bob@example.com")
-    assert client.get(f"{USERS}/", headers=bob_headers).status_code == 200
+    assert client.get(USERS, headers=bob_headers).status_code == 200
 
 
 def test_user_cannot_change_roles(client, db: Session, user_headers):

@@ -322,7 +322,5 @@ def test_legacy_bcrypt_hash_logs_in_and_is_upgraded(client, db: Session, outbox)
 
 
 def test_public_signup_is_disabled(client):
-    response = client.post(
-        f"{USERS}/", json={"email": "x@example.com", "password": PASSWORD}
-    )
+    response = client.post(USERS, json={"email": "x@example.com", "password": PASSWORD})
     assert response.status_code == 405

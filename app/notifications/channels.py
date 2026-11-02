@@ -40,6 +40,7 @@ EVENTS = (
     "deployment.succeeded",
     "job.failed",
     "report.weekly",
+    "security",
 )
 DEFAULT_EVENTS = [
     "alert.firing",
@@ -47,6 +48,7 @@ DEFAULT_EVENTS = [
     "deployment.failed",
     "job.failed",
     "report.weekly",
+    "security",
 ]
 TIMEOUT = 10
 TELEGRAM_TOKEN_RE = re.compile(r"\d{5,12}:[A-Za-z0-9_-]{30,50}")
@@ -58,6 +60,7 @@ EMOJI = {
     "deployment.succeeded": "🚀",
     "job.failed": "⏰",
     "report.weekly": "📊",
+    "security": "🛡️",
 }
 
 

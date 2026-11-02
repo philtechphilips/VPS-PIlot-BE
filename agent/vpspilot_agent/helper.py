@@ -29,6 +29,7 @@ from typing import Any
 from vpspilot_agent import (
     apperrors,
     appexec,
+    audit,
     backups,
     databases,
     deploy,
@@ -44,7 +45,9 @@ from vpspilot_agent.errors import Rejected
 
 log = logging.getLogger("vpspilot_helper")
 
-UNIT_RE = re.compile(r"^[A-Za-z0-9@._:-]{1,200}\.service$")
+# The first character can't be "-": systemctl would read the name as an option
+# (-H runs it against another host).
+UNIT_RE = re.compile(r"^[A-Za-z0-9_@][A-Za-z0-9@._:-]{0,199}\.service$")
 CONTAINER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 PROTECTED_UNITS = {"vpspilot-agent.service", "vpspilot-helper.service"}
 NO_STOP_UNITS = {"ssh.service", "sshd.service"}
@@ -99,9 +102,9 @@ def _service(verb: str) -> Callable[[dict[str, Any]], dict[str, Any]]:
             raise Rejected(f"{unit} is managed by VPSPilot")
         if verb == "stop" and unit in NO_STOP_UNITS:
             raise Rejected("stopping SSH is not allowed")
-        result = _run(["systemctl", verb, unit])
+        result = _run(["systemctl", verb, "--", unit])
         if result["exit_code"] == 0:
-            state = _run(["systemctl", "is-active", unit], timeout=10)
+            state = _run(["systemctl", "is-active", "--", unit], timeout=10)
             result["output"] = (
                 f"{result['output']}{unit}: {state['output'].strip()}".strip()
             )
@@ -150,6 +153,7 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "docker.ps": _docker_ps,
     "app.logs": deploy.app_logs,
     **apperrors.OPERATIONS,
+    **audit.OPERATIONS,
     **databases.OPERATIONS,
     **logs.OPERATIONS,
     **proxy.OPERATIONS,

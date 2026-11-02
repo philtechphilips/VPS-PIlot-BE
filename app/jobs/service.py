@@ -32,6 +32,7 @@ RUN_TIMEOUTS = {
     "os.upgrade": timedelta(minutes=50),
     "app.exec": timedelta(hours=6, minutes=5),
     "disk.cleanup": timedelta(minutes=30),
+    "apps.audit": timedelta(minutes=20),
 }
 LONGEST_TIMEOUT = max([RUN_TIMEOUT, *RUN_TIMEOUTS.values()])
 # Job types older agents don't know: refuse them with a clear message.
@@ -47,6 +48,7 @@ NEEDS_AGENT = {
     "firewall.apply": (1, 1, 5),
     "security.auto_updates": (1, 1, 5),
     "logs.search": (1, 1, 5),
+    "apps.audit": (1, 1, 7),
 }
 
 
@@ -61,6 +63,7 @@ def _agent_at_least(server: Server, needed: tuple[int, ...]) -> bool:
 MAX_OUTPUT = 64 * 1024
 MAX_EVENTS_PER_JOB = 500
 READ_ONLY_TYPES = {
+    "apps.audit",
     "logs.search",
     "disk.usage",
     "security.check",

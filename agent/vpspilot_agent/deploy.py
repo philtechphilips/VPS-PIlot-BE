@@ -556,6 +556,9 @@ def _fetch(spec: dict[str, Any], workdir: str, emit: Emit) -> tuple[str, str]:
         raise Failed("Couldn't read the commit")
     sha, _, message = out.partition("\n")
     emit("info", f"Checked out {sha[:12]} {message[:120]}")
+    from vpspilot_agent import audit  # audit imports this module
+
+    audit.warn_secrets(src, emit)
     return sha.strip(), message.strip()
 
 

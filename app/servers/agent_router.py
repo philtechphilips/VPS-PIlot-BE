@@ -20,6 +20,7 @@ from app.backups import service as backups
 from app.core import artifacts
 from app.core.config import settings
 from app.core.database import DbSession
+from app.core.ratelimit import limit
 from app.databases import service as databases
 from app.jobs import service as jobs
 from app.jobs.schemas import (
@@ -74,7 +75,11 @@ def _config(
     )
 
 
-@router.post("/v1/enroll", response_model=EnrollResponse)
+@router.post(
+    "/v1/enroll",
+    response_model=EnrollResponse,
+    dependencies=[limit("enroll", 10, 900)],
+)
 def enroll(body: EnrollRequest, request: Request, db: DbSession):
     """Redeem a single-use enrollment token for a per-agent credential."""
     try:
@@ -319,6 +324,52 @@ def report_usage(body: UsageReport, agent: Agent, db: DbSession):
     """CPU and memory per app, once a minute."""
     stored = apps.store_usage(db, agent, [r.model_dump() for r in body.rows])
     return {"stored": stored}
+
+
+Short = Annotated[str, StringConstraints(max_length=214)]
+
+
+class OsPackages(BaseModel):
+    ecosystem: Annotated[str, StringConstraints(max_length=40)] | None = None
+    id: Annotated[str, StringConstraints(max_length=20)] = ""
+    version: Annotated[str, StringConstraints(max_length=20)] = ""
+    packages: Annotated[
+        list[Annotated[list[Short], Field(min_length=2, max_length=2)]],
+        Field(max_length=5000),
+    ] = []
+
+
+class SecretHit(BaseModel):
+    path: Annotated[str, StringConstraints(max_length=300)]
+    line: Annotated[int, Field(ge=0)]
+    rule: Annotated[str, StringConstraints(max_length=100)]
+
+
+class PackageReport(BaseModel):
+    job_id: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]
+    app: Annotated[str, StringConstraints(max_length=40)]
+    packages: Annotated[
+        list[Annotated[list[Short], Field(min_length=3, max_length=3)]],
+        Field(max_length=20000),
+    ] = []
+    lockfiles: Annotated[
+        list[Annotated[str, StringConstraints(max_length=300)]], Field(max_length=100)
+    ] = []
+    os: OsPackages | None = None
+    secrets: Annotated[list[SecretHit], Field(max_length=50)] = []
+
+
+@router.post("/v1/app-packages", status_code=status.HTTP_202_ACCEPTED)
+def report_packages(body: PackageReport, agent: Agent, db: DbSession):
+    """One app's packages and committed secrets (job apps.audit)."""
+    from app.jobs.models import Job
+    from app.security import service as security
+
+    job = db.get(Job, body.job_id)
+    if job is None or job.server_id != agent.id or job.type != "apps.audit":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such scan job")
+    scan = security.store_scan(db, agent, body.model_dump())
+    return {"stored": scan is not None}
 
 
 # ---------------------------------------------------------------------------

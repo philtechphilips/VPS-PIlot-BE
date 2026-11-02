@@ -29,7 +29,9 @@ from app.auth.schemas import (
 from app.core.config import settings
 from app.core.database import DbSession
 from app.core.email import EmailDeliveryError
+from app.core.ratelimit import limit
 from app.core.security import create_access_token
+from app.security import events
 from app.users.models import User
 from app.users.schemas import UserResponse
 
@@ -136,7 +138,10 @@ def setup_status(db: DbSession):
 
 
 @router.post(
-    "/setup", response_model=ChallengeResponse, status_code=status.HTTP_201_CREATED
+    "/setup",
+    response_model=ChallengeResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[limit("setup", 10, 900)],
 )
 def setup(body: SetupRequest, request: Request, db: DbSession):
     """Create the owner account and email a code to verify the address."""
@@ -158,6 +163,7 @@ def setup(body: SetupRequest, request: Request, db: DbSession):
 
 @router.post(
     "/login",
+    dependencies=[limit("login", 10, 300)],
     response_model=ChallengeResponse | AuthResponse,
     responses={200: {"description": "A code was emailed, or the user is signed in"}},
 )
@@ -189,15 +195,19 @@ def login(body: LoginRequest, request: Request, response: Response, db: DbSessio
             raise EMAIL_FAILED from None
         return _challenge_response(challenge, user)
 
-    session, refresh_token = service.create_session(
-        db, user, request.headers.get("user-agent"), _client_ip(request)
-    )
+    ip, agent = _client_ip(request), request.headers.get("user-agent")
+    new_address = events.is_new_address(db, user, ip)
+    session, refresh_token = service.create_session(db, user, agent, ip)
     _audit(db, request, "auth.login", "success", user, detail="password only")
+    if new_address:
+        events.new_sign_in(db, user, ip, agent, request)
     _set_refresh_cookie(response, refresh_token)
     return _auth_response(user, session.id)
 
 
-@router.post("/2fa/verify", response_model=AuthResponse)
+@router.post(
+    "/2fa/verify", response_model=AuthResponse, dependencies=[limit("2fa", 10, 300)]
+)
 def verify_two_factor(
     body: VerifyRequest, request: Request, response: Response, db: DbSession
 ):
@@ -208,15 +218,21 @@ def verify_two_factor(
         _audit(db, request, "auth.2fa.verify", "failure", detail=error.detail)
         _raise(error)
 
-    session, refresh_token = service.create_session(
-        db, user, request.headers.get("user-agent"), _client_ip(request)
-    )
+    ip, agent = _client_ip(request), request.headers.get("user-agent")
+    new_address = events.is_new_address(db, user, ip)
+    session, refresh_token = service.create_session(db, user, agent, ip)
     _audit(db, request, "auth.login", "success", user, detail="with second factor")
+    if new_address:
+        events.new_sign_in(db, user, ip, agent, request)
     _set_refresh_cookie(response, refresh_token)
     return _auth_response(user, session.id)
 
 
-@router.post("/2fa/resend", response_model=ChallengeResponse)
+@router.post(
+    "/2fa/resend",
+    response_model=ChallengeResponse,
+    dependencies=[limit("2fa-resend", 5, 600)],
+)
 def resend_two_factor(body: ResendRequest, db: DbSession):
     try:
         issued = service.resend_challenge(db, body.challenge_id)
@@ -257,7 +273,11 @@ def totp_setup(current_user: CurrentUser, db: DbSession):
     return TotpSetupResponse(secret=secret, otpauth_uri=uri, qr_svg=qr_svg)
 
 
-@router.post("/2fa/totp/confirm", response_model=RecoveryCodesResponse)
+@router.post(
+    "/2fa/totp/confirm",
+    response_model=RecoveryCodesResponse,
+    dependencies=[limit("2fa", 10, 300)],
+)
 def totp_confirm(
     body: CodeRequest, request: Request, current_user: CurrentUser, db: DbSession
 ):
@@ -367,7 +387,11 @@ def revoke_other_sessions(
 # ---------------------------------------------------------------------------
 
 
-@router.post("/forgot-password", response_model=MessageResponse)
+@router.post(
+    "/forgot-password",
+    response_model=MessageResponse,
+    dependencies=[limit("forgot", 5, 900)],
+)
 def forgot_password(body: ForgotPasswordRequest, db: DbSession):
     token = service.create_password_reset_token(db, body.email)
     if token is not None:
@@ -385,7 +409,11 @@ def forgot_password(body: ForgotPasswordRequest, db: DbSession):
     )
 
 
-@router.post("/reset-password", response_model=MessageResponse)
+@router.post(
+    "/reset-password",
+    response_model=MessageResponse,
+    dependencies=[limit("password", 10, 900)],
+)
 def reset_password(body: ResetPasswordRequest, request: Request, db: DbSession):
     if not service.reset_password(db, body.token, body.new_password):
         _audit(db, request, "auth.password_reset", "failure", detail="bad token")
@@ -397,7 +425,11 @@ def reset_password(body: ResetPasswordRequest, request: Request, db: DbSession):
     return MessageResponse(message="Password has been reset")
 
 
-@router.post("/password", response_model=MessageResponse)
+@router.post(
+    "/password",
+    response_model=MessageResponse,
+    dependencies=[limit("password", 10, 900)],
+)
 def change_password(
     body: ChangePasswordRequest,
     request: Request,

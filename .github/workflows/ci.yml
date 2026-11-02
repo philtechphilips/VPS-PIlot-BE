@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Mondays: advisories published since the last push still fail the build.
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Run from the official image, pinned by digest (no third-party action code).
+  TRIVY: aquasec/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
+
+jobs:
+  test:
+    name: Lint and test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - run: uv sync --frozen
+      - name: Lint
+        run: uv run ruff check app agent tests
+      - name: The agent still parses on Ubuntu 22.04's Python 3.10
+        run: uv run ruff check --target-version py310 --select E9 agent
+      - name: Test
+        run: uv run pytest -q
+
+  trivy:
+    name: Trivy
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write # findings in the repository's Security tab
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Scan the repository (dependencies, secrets, Dockerfile)
+        run: >-
+          docker run --rm -v "$PWD:/src" -w /src -v "$HOME/.cache/trivy:/root/.cache/trivy" "$TRIVY"
+          fs --scanners vuln,secret,misconfig --severity HIGH,CRITICAL --ignore-unfixed
+          --exit-code 1 .
+      - name: Build the API image
+        run: docker build -t vpspilot/api:ci .
+      - name: Scan the image (OS packages and Python packages)
+        run: >-
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$HOME/.cache/trivy:/root/.cache/trivy" "$TRIVY"
+          image --scanners vuln,secret --severity HIGH,CRITICAL --ignore-unfixed
+          --exit-code 1 vpspilot/api:ci
+      # Everything with a fix, any severity (unfixable distro issues would only be noise).
+      - name: Full reports for the Security tab
+        if: ${{ !cancelled() }}
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src -v "$HOME/.cache/trivy:/root/.cache/trivy" "$TRIVY" \
+            fs --scanners vuln,secret,misconfig --ignore-unfixed --format sarif --output trivy-repo.sarif .
+          docker run --rm -v "$PWD:/src" -w /src -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$HOME/.cache/trivy:/root/.cache/trivy" "$TRIVY" \
+            image --scanners vuln,secret --ignore-unfixed --format sarif --output trivy-image.sarif vpspilot/api:ci
+      - uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        if: ${{ !cancelled() && hashFiles('trivy-repo.sarif') != '' }}
+        with:
+          sarif_file: trivy-repo.sarif
+          category: trivy-repository
+      - uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        if: ${{ !cancelled() && hashFiles('trivy-image.sarif') != '' }}
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image

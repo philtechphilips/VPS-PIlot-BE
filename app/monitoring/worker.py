@@ -48,6 +48,10 @@ def _tick() -> None:
         from app.notifications import weekly
 
         weekly.run_due(db)
+        from app.security import service as security
+
+        security.run_due(db)
+        security.rebuild_due(db)
         counts = service.evaluate(db)
         if counts["fired"] or counts["resolved"]:
             logger.info(

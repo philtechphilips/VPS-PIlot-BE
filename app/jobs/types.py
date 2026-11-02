@@ -16,7 +16,10 @@ from pydantic import (
     model_validator,
 )
 
-Unit = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9@._:-]{1,200}\.service$")]
+# Never a leading "-": the agent passes the name to systemctl (see helper.UNIT_RE).
+Unit = Annotated[
+    str, StringConstraints(pattern=r"^[A-Za-z0-9_@][A-Za-z0-9@._:-]{0,199}\.service$")
+]
 Container = Annotated[
     str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 ]
@@ -517,6 +520,21 @@ class AutoUpdatesPayload(Strict):
     pass
 
 
+class AuditApp(Strict):
+    app: AppName
+    runtime: Literal["docker", "systemd", "compose"]
+    context: RelPath = "."
+    service: Annotated[
+        str, StringConstraints(pattern=r"^([a-zA-Z0-9][a-zA-Z0-9_.-]{0,62})?$")
+    ] = ""
+
+
+class AppsAuditPayload(Strict):
+    """Read apps' lockfiles, container OS packages and committed secrets."""
+
+    apps: Annotated[list[AuditApp], Field(min_length=1, max_length=200)]
+
+
 class LogsSearchPayload(Strict):
     """Lines containing `query` in the apps' logs (read-only)."""
 
@@ -555,6 +573,7 @@ JOB_TYPES: dict[str, type[Strict]] = {
     "security.check": SecurityCheckPayload,
     "firewall.apply": FirewallPayload,
     "security.auto_updates": AutoUpdatesPayload,
+    "apps.audit": AppsAuditPayload,
     "logs.search": LogsSearchPayload,
     "proxy.apply": ProxyApplyPayload,
     "proxy.status": ProxyStatusPayload,

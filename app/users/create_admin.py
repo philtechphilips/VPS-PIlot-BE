@@ -29,7 +29,10 @@ def main() -> None:
     with SessionLocal() as db:
         user = service.get_user_by_email(db, args.email)
         if user is not None:
+            changed = user.role != role
             service.set_role(db, user, role)
+            if changed:
+                _report(db, user, f"{args.email} is now {title}")
             print(f"{args.email} is now {title}")
             return
 
@@ -41,8 +44,22 @@ def main() -> None:
         except ValidationError as error:
             sys.exit(str(error))
 
-        service.create_user(db, user_in, role=role)
+        user = service.create_user(db, user_in, role=role)
+        _report(db, user, f"{args.email} was added as {title}")
         print(f"Created {title}: {args.email}")
+
+
+def _report(db, user, title: str) -> None:
+    from app.security import events
+
+    events.record(
+        db,
+        "role_changed",
+        title,
+        "Done from the server's command line (vpspilot admin / viewer).",
+        user=user,
+        actor=("cli", "server command line"),
+    )
 
 
 if __name__ == "__main__":

@@ -32,6 +32,7 @@ from app.core.security import (
     totp_uri,
     verify_password,
 )
+from app.security import events
 from app.users import service as users_service
 from app.users.models import Role, User
 from app.users.schemas import UserCreate
@@ -136,6 +137,15 @@ def login(db: Session, email: str, password: str) -> User:
             user.failed_login_attempts = 0
             user.locked_until = _now() + timedelta(
                 minutes=settings.login_lockout_minutes
+            )
+            db.commit()
+            events.record(
+                db,
+                "account_locked",
+                f"{user.email} locked after failed sign-ins",
+                f"{attempts} wrong passwords in a row. Sign-in is blocked for "
+                f"{settings.login_lockout_minutes} minutes.",
+                user=user,
             )
         else:
             user.failed_login_attempts = attempts
@@ -292,9 +302,10 @@ def verify_challenge(db: Session, challenge_id: str, code: str) -> User:
     if user is None:
         raise AuthError(400, "This code has expired. Request a new one.")
 
+    recovery = False
     if challenge.method == "totp":
         if _looks_like_recovery_code(code):
-            ok = _use_recovery_code(db, user, code)
+            ok = recovery = _use_recovery_code(db, user, code)
         else:
             ok = _use_totp(user, code)
     else:
@@ -320,6 +331,17 @@ def verify_challenge(db: Session, challenge_id: str, code: str) -> User:
         user.email_verified_at = _now()
     db.commit()
     db.refresh(user)
+    if recovery:
+        left = remaining_recovery_codes(db, user)
+        events.record(
+            db,
+            "recovery_code_used",
+            f"Recovery code used to sign in to {user.email}",
+            f"{left} recovery code{'s' if left != 1 else ''} left. If the "
+            "authenticator was lost, set it up again from the account settings.",
+            user=user,
+            actor=(f"user:{user.id}", user.email),
+        )
     return user
 
 
@@ -369,6 +391,15 @@ def confirm_totp(db: Session, user: User, code: str) -> list[str]:
         db.add(RecoveryCode(user_id=user.id, code_hash=hash_token(recovery)))
     db.commit()
     db.refresh(user)
+    events.record(
+        db,
+        "authenticator_enabled",
+        f"Authenticator app set up for {user.email}",
+        "Sign-ins now ask for a code from the app. New recovery codes were issued "
+        "and the old ones stopped working.",
+        user=user,
+        actor=(f"user:{user.id}", user.email),
+    )
     return codes
 
 
@@ -541,6 +572,16 @@ def reset_password(db: Session, token: str, new_password: str) -> bool:
     ).update({"revoked_at": _now()}, synchronize_session=False)
     db.query(User).filter(User.id == user_id).update({"locked_until": None})
     db.commit()
+    user = db.get(User, user_id)
+    if user is not None:
+        events.record(
+            db,
+            "password_reset",
+            f"Password reset for {user.email}",
+            "The password was set through a reset link and every session was "
+            "signed out.",
+            user=user,
+        )
     return True
 
 
@@ -559,4 +600,12 @@ def change_password(
         AuthSession.id != keep_session_id,
     ).update({"revoked_at": _now()}, synchronize_session=False)
     db.commit()
+    events.record(
+        db,
+        "password_changed",
+        f"Password changed for {user.email}",
+        "Every other session was signed out.",
+        user=user,
+        actor=(f"user:{user.id}", user.email),
+    )
     return True

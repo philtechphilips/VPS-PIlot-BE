@@ -80,6 +80,19 @@ KINDS: dict[str, Kind] = {
     "backup_stale": Kind(
         "Backups stale or failing", "database", threshold=36, duration=0, unit="hours"
     ),
+    # threshold = critical/high vulnerabilities that have a fix (security.service)
+    "vulnerable_deps": Kind(
+        "Vulnerable dependencies", "application", threshold=1, duration=0, unit="count"
+    ),
+    "secrets_committed": Kind("Secrets in the repository", "application", duration=0),
+    # threshold = days left before the runtime or distro stops getting fixes
+    "runtime_eol": Kind(
+        "Runtime end of life", "application", threshold=30, duration=0, unit="days"
+    ),
+    # Fires after the duration: time to upgrade on your own schedule.
+    "agent_outdated": Kind(
+        "Agent out of date", "server", duration=4320, severity="info"
+    ),
 }
 
 
@@ -413,6 +426,93 @@ def _check_updates(rule: AlertRule, server: Server, now: datetime) -> Check:
     return Check(count >= rule.threshold, float(count), detail)
 
 
+def _findings(db: Session, app: Application, *kinds: str):
+    """An app's open (not ignored) findings, or None before its first check."""
+    from app.security.models import AppFinding, AppScan
+
+    scan = db.get(AppScan, app.id)
+    if scan is None or scan.checked_at is None:
+        return None
+    return list(
+        db.scalars(
+            select(AppFinding).where(
+                AppFinding.application_id == app.id,
+                AppFinding.kind.in_(kinds),
+                AppFinding.ignored_at.is_(None),
+            )
+        )
+    )
+
+
+def _check_vulns(db: Session, rule: AlertRule, app: Application) -> Check:
+    rows = _findings(db, app, "dependency", "os")
+    if rows is None:
+        return Check(None)
+    serious = [
+        f for f in rows if f.severity in ("critical", "high") and f.fixed is not None
+    ]
+    count = len(serious)
+    if count < rule.threshold:
+        return Check(False, float(count))
+    serious.sort(key=lambda f: (f.severity != "critical", f.package or ""))
+    shown: list[str] = []
+    for f in serious:
+        text = f"{f.package} {f.version} (fixed in {f.fixed})"
+        if text not in shown:
+            shown.append(text)
+    noun = "vulnerability" if count == 1 else "vulnerabilities"
+    more = f" and {len(shown) - 3} more" if len(shown) > 3 else ""
+    detail = f"{count} critical or high {noun} with a fix: {', '.join(shown[:3])}{more}"
+    return Check(True, float(count), detail)
+
+
+def _check_secrets(db: Session, app: Application) -> Check:
+    rows = _findings(db, app, "secret")
+    if rows is None:
+        return Check(None)
+    if not rows:
+        return Check(False, 0.0)
+    paths = ", ".join(f.path or "" for f in rows[:3])
+    return Check(True, float(len(rows)), f"Possible secrets committed: {paths}")
+
+
+def _check_eol(db: Session, rule: AlertRule, app: Application, now: datetime) -> Check:
+    rows = _findings(db, app, "eol")
+    if rows is None:
+        return Check(None)
+    due = [
+        f
+        for f in rows
+        if f.eol_at is not None
+        and (_aware(f.eol_at) - now).total_seconds() / 86400 < rule.threshold
+    ]
+    if not due:
+        return Check(False)
+    return Check(True, None, "; ".join(f.title for f in due))
+
+
+def _check_agent(server: Server) -> Check:
+    from app.agent_version import AGENT_VERSION
+
+    if not server.agent_version:
+        return Check(None)
+
+    def parts(version: str) -> tuple[int, ...]:
+        try:
+            return tuple(int(p) for p in version.split(".")[:3])
+        except ValueError:
+            return (0,)
+
+    if parts(server.agent_version) >= parts(AGENT_VERSION):
+        return Check(False)
+    return Check(
+        True,
+        None,
+        f"Agent {server.agent_version}, latest {AGENT_VERSION}. Re-run the install "
+        "command on the server to upgrade it.",
+    )
+
+
 def _check_app(app: Application, server: Server | None, now: datetime) -> Check:
     if server is None or app.current_deployment_id is None:
         return Check(None)  # never released: nothing should be running yet
@@ -590,6 +690,14 @@ def evaluate(db: Session, now: datetime | None = None) -> dict[str, int]:
                 check = _check_errors(db, rule, target, now)
             elif rule.kind == "error_rate":
                 check = _check_error_rate(db, rule, target, now)
+            elif rule.kind == "vulnerable_deps":
+                check = _check_vulns(db, rule, target)
+            elif rule.kind == "secrets_committed":
+                check = _check_secrets(db, target)
+            elif rule.kind == "runtime_eol":
+                check = _check_eol(db, rule, target, now)
+            elif rule.kind == "agent_outdated":
+                check = _check_agent(target)
             elif spec.metric:
                 check = _check_metric(db, rule, target, now)
             else:
@@ -601,7 +709,11 @@ def evaluate(db: Session, now: datetime | None = None) -> dict[str, int]:
                     continue  # maintenance: don't open incidents
                 if alert is None:
                     # Offline and metric rules already waited out their window.
-                    wait = rule.kind in ("app_down", "updates_pending")
+                    wait = rule.kind in (
+                        "app_down",
+                        "updates_pending",
+                        "agent_outdated",
+                    )
                     alert = Alert(
                         id=new_id(),
                         rule_id=rule.id,

@@ -133,6 +133,22 @@ def test_helper_runs_argument_lists(monkeypatch):
     assert seen == [["docker", "logs", "--tail", "20", "--timestamps", "web"]]
 
 
+def test_unit_names_cannot_become_systemctl_options(monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        helper,
+        "_run",
+        lambda cmd, timeout=60: seen.append(cmd) or {"exit_code": 0, "output": ""},
+    )
+    # "-H" would make systemctl act on another host over SSH.
+    for unit in ("-Hroot@203.0.113.9.service", "--host=x.service", ".hidden.service"):
+        result = helper.handle({"op": "service.restart", "args": {"unit": unit}})
+        assert result == {"ok": False, "error": "invalid unit name"}
+    assert seen == []
+    helper.handle({"op": "service.restart", "args": {"unit": "getty@tty1.service"}})
+    assert seen[0] == ["systemctl", "restart", "--", "getty@tty1.service"]
+
+
 class RecordingClient:
     def __init__(self):
         self.calls = []

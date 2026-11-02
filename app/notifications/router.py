@@ -100,6 +100,7 @@ Event = Literal[
     "deployment.succeeded",
     "job.failed",
     "report.weekly",
+    "security",
 ]
 
 

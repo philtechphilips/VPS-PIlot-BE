@@ -12,6 +12,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    false,
     func,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -55,6 +56,9 @@ class Application(Base):
     github_repo_id: Mapped[int | None] = mapped_column(BigInteger, index=True)
     github_repo_full_name: Mapped[str | None] = mapped_column(String(200))
     auto_deploy: Mapped[bool] = mapped_column(Boolean, server_default="false")
+    # Redeploy the live version weekly so base images and OS packages pick up
+    # security fixes (security.service.rebuild_due).
+    auto_rebuild: Mapped[bool] = mapped_column(Boolean, server_default=false())
 
     container_port: Mapped[int]
     host_port: Mapped[int]

@@ -143,12 +143,76 @@ def build(db: Session, now: datetime | None = None) -> dict[str, Any]:
         sections.append(("Disk", disk_lines))
     if update_lines:
         sections.append(("Updates", update_lines))
+    security = _security_lines(db, servers, since)
+    if security:
+        sections.append(("Security", security))
 
     start = (now - timedelta(days=7)).strftime("%b %d")
     return {
         "title": f"Your week on VPSPilot ({start} to {now.strftime('%b %d')})",
         "sections": sections,
     }
+
+
+def _security_lines(db: Session, servers: list, since: datetime) -> list[str]:
+    """Open findings per app, outdated agents and the week's account events."""
+    from app.agent_version import AGENT_VERSION
+    from app.apps.models import Application
+    from app.audit.models import AuditLog
+    from app.security.models import AppFinding
+
+    lines = []
+    per_app: dict[str, list[AppFinding]] = {}
+    for f in db.scalars(select(AppFinding).where(AppFinding.ignored_at.is_(None))):
+        per_app.setdefault(f.application_id, []).append(f)
+    for app_id, found in per_app.items():
+        app = db.get(Application, app_id)
+        if app is None:
+            continue
+        serious = [
+            f
+            for f in found
+            if f.kind in ("dependency", "os")
+            and f.severity in ("critical", "high")
+            and f.fixed
+        ]
+        if serious:
+            first = serious[0]
+            lines.append(
+                f"{app.name}: {len(serious)} critical/high with a fix "
+                f"(e.g. {first.package} {first.version} → {first.fixed})"
+            )
+        if any(f.kind == "secret" for f in found):
+            lines.append(f"{app.name}: possible secrets committed to its repository")
+        lines += [f"{app.name}: {f.title}" for f in found if f.kind == "eol"]
+
+    def parts(version: str) -> tuple[int, ...]:
+        try:
+            return tuple(int(p) for p in version.split(".")[:3])
+        except ValueError:
+            return (0,)
+
+    for server in servers:
+        if server.agent_version and parts(server.agent_version) < parts(AGENT_VERSION):
+            lines.append(
+                f"{server.name}: agent {server.agent_version} (latest {AGENT_VERSION})"
+            )
+    events = Counter(
+        action
+        for (action,) in db.execute(
+            select(AuditLog.action).where(
+                AuditLog.created_at >= since, AuditLog.action.startswith("security.")
+            )
+        )
+        if action not in ("security.scan", "security.ignore", "security.unignore")
+    )
+    if events.get("security.new_sign_in"):
+        n = events["security.new_sign_in"]
+        lines.append(f"{n} sign-in{'s' if n != 1 else ''} from a new address")
+    other = sum(v for k, v in events.items() if k != "security.new_sign_in")
+    if other:
+        lines.append(f"{other} other account or team change{'s' if other != 1 else ''}")
+    return lines[:12]
 
 
 def as_text(report: dict[str, Any]) -> str:

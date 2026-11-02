@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, StringConstraints
 from app.audit import service as audit
 from app.auth.dependencies import AdminUser
 from app.core.database import DbSession
+from app.core.ratelimit import limit
 from app.domains import status_pages
 from app.domains.models import StatusPage
 
@@ -109,7 +110,7 @@ def delete_page(page_id: str, request: Request, db: DbSession, user: AdminUser):
     db.commit()
 
 
-@router.get("/status/{slug}")
+@router.get("/status/{slug}", dependencies=[limit("status", 120, 60)])
 def public_page(slug: Slug, db: DbSession):
     """The public view. No sign-in: share the link with anyone."""
     body = status_pages.public(db, slug)

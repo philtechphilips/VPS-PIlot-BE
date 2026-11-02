@@ -18,7 +18,7 @@ def get_me(current_user: CurrentUser):
     return current_user
 
 
-@router.get("/", response_model=list[UserResponse])
+@router.get("", response_model=list[UserResponse])
 def list_users(
     db: DbSession,
     _: AdminOnly,
@@ -58,4 +58,19 @@ def update_role(user_id: int, body: RoleUpdate, db: DbSession, admin: AdminUser)
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"User with id {user_id} not found",
         )
-    return service.set_role(db, user, body.role)
+    before = user.role
+    updated = service.set_role(db, user, body.role)
+    if before != body.role:
+        from app.security import events
+
+        role = getattr(body.role, "value", body.role)
+        events.record(
+            db,
+            "role_changed",
+            f"{updated.email} is now {'an' if role == 'admin' else 'a'} {role}",
+            f"Changed by {admin.email}"
+            + (" and can now change everything." if role == "admin" else "."),
+            user=updated,
+            actor=(f"user:{admin.id}", admin.email),
+        )
+    return updated

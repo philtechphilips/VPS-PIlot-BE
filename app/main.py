@@ -1,7 +1,7 @@
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.apps.cron_router import router as cron_router
@@ -21,6 +21,7 @@ from app.monitoring import worker as monitoring_worker
 from app.monitoring.router import router as monitoring_router
 from app.notifications.router import router as notifications_router
 from app.platform.router import router as platform_router
+from app.security.router import router as security_router
 from app.servers.agent_router import router as agent_router
 from app.servers.router import router as servers_router
 from app.users.router import router as users_router
@@ -43,6 +44,22 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title=settings.project_name, lifespan=lifespan)
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    """Browser protections for every API response (the dashboard sets its own
+    in next.config.ts). HSTS only over HTTPS: Caddy reports the scheme."""
+    response = await call_next(request)
+    headers = response.headers
+    headers.setdefault("X-Content-Type-Options", "nosniff")
+    headers.setdefault("X-Frame-Options", "DENY")
+    headers.setdefault("Referrer-Policy", "no-referrer")
+    headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+    if request.url.scheme == "https":
+        headers.setdefault("Strict-Transport-Security", "max-age=31536000")
+    return response
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -70,6 +87,7 @@ app.include_router(domains_router)
 app.include_router(status_router)
 app.include_router(backups_router)
 app.include_router(platform_router)
+app.include_router(security_router)
 
 
 @app.get("/")

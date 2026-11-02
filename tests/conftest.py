@@ -78,6 +78,18 @@ def outbox(monkeypatch) -> list[SentEmail]:
     return sent
 
 
+@pytest.fixture(autouse=True)
+def _isolated(monkeypatch):
+    """Fresh rate-limit counts per test, and no background vulnerability
+    checks (they open their own database session; tests call check_app)."""
+    from app.core import ratelimit
+    from app.security import service as security
+
+    ratelimit.reset()
+    security._running.clear()
+    monkeypatch.setattr(security, "_background", lambda fn, *args: None)
+
+
 @pytest.fixture
 def db():
     Base.metadata.create_all(engine)

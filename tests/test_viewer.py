@@ -64,7 +64,7 @@ def test_viewers_dont_see_secrets(client, db: Session, outbox, admin_headers):
         ).status_code
         == 403
     )
-    assert client.get("/api/v1/users/", headers=viewer).status_code == 403
+    assert client.get("/api/v1/users", headers=viewer).status_code == 403
 
 
 def test_viewers_get_the_inbox(client, db: Session, outbox, admin_headers):

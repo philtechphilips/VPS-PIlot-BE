@@ -23,3 +23,5 @@ class PlatformSettings(Base):
     weekly_report: Mapped[bool] = mapped_column(server_default=true())
     report_timezone: Mapped[str] = mapped_column(String(64), server_default="UTC")
     weekly_report_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    # Look up apps' packages on OSV.dev (names and versions leave the server).
+    vuln_checks: Mapped[bool] = mapped_column(server_default=true())

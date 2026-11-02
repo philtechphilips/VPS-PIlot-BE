@@ -103,6 +103,22 @@ def send_report_email(to: str, report: dict, url: str) -> None:
     mailer.send_email(to, report["title"], html, text + f"\n\n{url}\n")
 
 
+def send_security_email(to: str, d: dict) -> None:
+    """A change to an account or the team (security.events)."""
+    html = _layout(
+        preheader=f"{d['title']}. {d['detail']}",
+        chip="Security",
+        heading=d["title"],
+        intro=escape(d["detail"]),
+        body=f'<div style="margin:24px 0 22px">{_button("Review sessions", d["url"])}</div>'
+        + _note(
+            "Not you? Change your password, sign out other sessions and check the audit log."
+        ),
+    )
+    text = f"{d['title']}\n\n{d['detail']}\n\nNot you? Change your password and sign out other sessions: {d['url']}\n"
+    mailer.send_email(to, f"Security: {d['title']}", html, text)
+
+
 def send_alert_email(to: str, d: dict) -> None:
     firing = d["firing"]
     if firing:

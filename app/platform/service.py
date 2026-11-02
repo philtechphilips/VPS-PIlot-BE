@@ -25,8 +25,11 @@ def update(
     clear_url: bool = False,
     weekly_report: bool | None = None,
     report_timezone: str | None = None,
+    vuln_checks: bool | None = None,
 ) -> PlatformSettings:
     row = get(db)
+    if vuln_checks is not None:
+        row.vuln_checks = vuln_checks
     if weekly_report is not None:
         row.weekly_report = weekly_report
     if report_timezone is not None:
