@@ -82,7 +82,11 @@ def run(args: dict[str, Any], emit) -> dict[str, Any]:
         timer.cancel()
     output = "\n".join(tail)
     if timed_out and code < 0:
-        return {"exit_code": 124, "output": output, "error": f"Stopped after {timeout // 60} min"}
+        return {
+            "exit_code": 124,
+            "output": output,
+            "error": f"Stopped after {timeout // 60} min",
+        }
     if code != 0:
         last = next((line for line in reversed(tail) if line.strip()), "")
         message = f"Exited with code {code}" + (f": {last[:200]}" if last else "")

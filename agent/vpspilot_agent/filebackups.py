@@ -143,12 +143,19 @@ def create(args: dict[str, Any], emit: b.Emit) -> dict[str, Any]:
         stderr = (proc.stderr.read() if proc.stderr else b"").decode(errors="replace")
     if code != 0:
         os.unlink(path)
-        return {"exit_code": 1, "output": "", "error": f"Encryption failed: {stderr[-300:]}"}
+        return {
+            "exit_code": 1,
+            "output": "",
+            "error": f"Encryption failed: {stderr[-300:]}",
+        }
     os.chmod(path, 0o600)
     total, checksum = os.path.getsize(path), b._sha256(path)
     emit("info", f"{files} files ({size} bytes) packed into {total} encrypted bytes")
     if skipped:
-        emit("warn", f"{skipped} files changed or vanished while packing and were skipped")
+        emit(
+            "warn",
+            f"{skipped} files changed or vanished while packing and were skipped",
+        )
     remote = None
     try:
         if storage:
@@ -213,7 +220,11 @@ def restore(args: dict[str, Any], emit: b.Emit) -> dict[str, Any]:
     if mode not in ("replace", "verify"):
         raise Rejected("invalid mode")
     targets = dict(sources(app, runtime)) if mode == "replace" else {}
-    if mode == "replace" and runtime == "docker" and "volumes/" + data_volume(app) not in targets:
+    if (
+        mode == "replace"
+        and runtime == "docker"
+        and "volumes/" + data_volume(app) not in targets
+    ):
         d._run(["docker", "volume", "create", data_volume(app)], timeout=30)
         targets = dict(sources(app, runtime))
     path, temporary = None, False
@@ -264,10 +275,14 @@ def restore(args: dict[str, Any], emit: b.Emit) -> dict[str, Any]:
                         member.name = rel
                         if member.islnk():
                             link = member.linkname[len(arc) + 1 :]
-                            if not member.linkname.startswith(arc + "/") or not _inside(root, link):
+                            if not member.linkname.startswith(arc + "/") or not _inside(
+                                root, link
+                            ):
                                 continue
                             member.linkname = link
-                        kwargs = {"filter": "tar"} if hasattr(tarfile, "tar_filter") else {}
+                        kwargs = (
+                            {"filter": "tar"} if hasattr(tarfile, "tar_filter") else {}
+                        )
                         tar.extract(member, root, **kwargs)
             finally:
                 if proc.stdout:
@@ -278,14 +293,21 @@ def restore(args: dict[str, Any], emit: b.Emit) -> dict[str, Any]:
         for arc in sorted(missing):
             emit("warn", f"{arc} no longer exists here; skipped")
         summary = f"{files} files ({size} bytes)"
-        emit("info", ("Backup is readable: " if mode == "verify" else "Restored ") + summary)
+        emit(
+            "info",
+            ("Backup is readable: " if mode == "verify" else "Restored ") + summary,
+        )
         return {
             "exit_code": 0,
             "output": json.dumps({"files": files, "bytes": size}),
             "result": {"files": files, "bytes": size},
         }
     except (b.Failed, tarfile.TarError, OSError) as error:
-        message = str(error) if isinstance(error, b.Failed) else f"The backup is damaged: {error}"
+        message = (
+            str(error)
+            if isinstance(error, b.Failed)
+            else f"The backup is damaged: {error}"
+        )
         emit("error", message)
         return {"exit_code": 1, "output": "", "error": message}
     finally:

@@ -33,7 +33,11 @@ def upgrade(args: dict[str, Any], emit) -> dict[str, Any]:
     if mode not in SCRIPTS:
         raise Rejected("invalid mode")
     if shutil.which("apt-get") is None:
-        return {"exit_code": 1, "output": "", "error": "Only apt-based systems are supported"}
+        return {
+            "exit_code": 1,
+            "output": "",
+            "error": "Only apt-based systems are supported",
+        }
     if mode == "security" and shutil.which("unattended-upgrade") is None:
         return {
             "exit_code": 1,
@@ -41,8 +45,17 @@ def upgrade(args: dict[str, Any], emit) -> dict[str, Any]:
             "error": "Security-only updates need the unattended-upgrades package; "
             "install it or apply all updates",
         }
-    subprocess.run(["systemctl", "reset-failed", f"{UNIT}.service"], capture_output=True, check=False)
-    emit("step", "Installing security updates" if mode == "security" else "Installing all updates")
+    subprocess.run(
+        ["systemctl", "reset-failed", f"{UNIT}.service"],
+        capture_output=True,
+        check=False,
+    )
+    emit(
+        "step",
+        "Installing security updates"
+        if mode == "security"
+        else "Installing all updates",
+    )
     proc = subprocess.Popen(
         [
             "systemd-run", f"--unit={UNIT}", "--wait", "--pipe", "--quiet", "--collect",
@@ -68,24 +81,50 @@ def upgrade(args: dict[str, Any], emit) -> dict[str, Any]:
         code = proc.wait(timeout=TIMEOUT)
     except subprocess.TimeoutExpired:
         proc.kill()
-        return {"exit_code": 124, "output": "", "error": "The upgrade took too long; it keeps running on the server"}
+        return {
+            "exit_code": 124,
+            "output": "",
+            "error": "The upgrade took too long; it keeps running on the server",
+        }
     if code != 0:
-        return {"exit_code": code, "output": "\n".join(tail), "error": "The upgrade failed: " + (tail[-1] if tail else f"exit {code}")}
+        return {
+            "exit_code": code,
+            "output": "\n".join(tail),
+            "error": "The upgrade failed: " + (tail[-1] if tail else f"exit {code}"),
+        }
     reboot = os.path.exists("/var/run/reboot-required")
-    emit("info", "Updates installed" + ("; a reboot is required to finish" if reboot else ""))
-    return {"exit_code": 0, "output": "\n".join(tail), "result": {"reboot_required": reboot}}
+    emit(
+        "info",
+        "Updates installed" + ("; a reboot is required to finish" if reboot else ""),
+    )
+    return {
+        "exit_code": 0,
+        "output": "\n".join(tail),
+        "result": {"reboot_required": reboot},
+    }
 
 
 def reboot(args: dict[str, Any]) -> dict[str, Any]:
     """Reboot in a few seconds, so this job can report back first."""
     code = subprocess.run(
-        ["systemd-run", "--on-active=10", "--unit=vpspilot-reboot", "--collect", "systemctl", "reboot"],
+        [
+            "systemd-run",
+            "--on-active=10",
+            "--unit=vpspilot-reboot",
+            "--collect",
+            "systemctl",
+            "reboot",
+        ],
         capture_output=True,
         text=True,
         check=False,
     )
     if code.returncode != 0:
-        return {"exit_code": code.returncode, "output": code.stderr[-300:], "error": "Couldn't schedule the reboot"}
+        return {
+            "exit_code": code.returncode,
+            "output": code.stderr[-300:],
+            "error": "Couldn't schedule the reboot",
+        }
     return {"exit_code": 0, "output": "Rebooting in 10 seconds"}
 
 

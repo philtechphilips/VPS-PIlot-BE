@@ -152,7 +152,9 @@ def _sources() -> list[tuple[str, str, str]]:
     return found
 
 
-def _docker_lines(name: str, since: str, until: str, deadline: float, limit: int | None = MAX_LINES):
+def _docker_lines(
+    name: str, since: str, until: str, deadline: float, limit: int | None = MAX_LINES
+):
     """(epoch, message, priority) for lines logged in (since, until]."""
     proc = subprocess.Popen(
         ["docker", "logs", "--timestamps", "--since", since, "--until", until, name],
@@ -177,7 +179,13 @@ def _docker_lines(name: str, since: str, until: str, deadline: float, limit: int
         proc.wait()
 
 
-def _journal_lines(unit: str, since: float, until: float, deadline: float, limit: int | None = MAX_LINES):
+def _journal_lines(
+    unit: str,
+    since: float,
+    until: float,
+    deadline: float,
+    limit: int | None = MAX_LINES,
+):
     proc = subprocess.Popen(
         [
             "journalctl", "-u", unit, "-o", "json", "--no-pager",
@@ -273,7 +281,11 @@ def scan(args: dict[str, Any]) -> dict[str, Any]:
             row["sample"] = redact(message.strip())
             group = row["groups"].get(fp)
             if group is None and len(row["groups"]) < MAX_GROUPS:
-                group = row["groups"][fp] = {"fp": fp, "count": 0, "sample": row["sample"]}
+                group = row["groups"][fp] = {
+                    "fp": fp,
+                    "count": 0,
+                    "sample": row["sample"],
+                }
             if group is not None:
                 group["count"] += 1
     rows = sorted(buckets.values(), key=lambda r: r["minute"])[-MAX_ROWS:]
@@ -297,7 +309,8 @@ def search(args: dict[str, Any]) -> dict[str, Any]:
         raise Rejected("invalid since")
     apps = args.get("apps")
     if apps is not None and (
-        not isinstance(apps, list) or not all(isinstance(a, str) and d.APP_RE.match(a) for a in apps)
+        not isinstance(apps, list)
+        or not all(isinstance(a, str) and d.APP_RE.match(a) for a in apps)
     ):
         raise Rejected("invalid apps")
     needle = query.lower()
@@ -317,12 +330,22 @@ def search(args: dict[str, Any]) -> dict[str, Any]:
         for epoch, message, _ in lines:
             message = ANSI_RE.sub("", message)
             if needle in message.lower():
-                matches.append({"app": app, "t": epoch, "line": redact(message.strip())})
+                matches.append(
+                    {"app": app, "t": epoch, "line": redact(message.strip())}
+                )
     matches.sort(key=lambda m: m["t"])
     if len(matches) > MAX_MATCHES:
         matches, truncated = matches[-MAX_MATCHES:], True
-    body = {"matches": matches, "truncated": truncated, "timed_out": time.monotonic() > deadline}
-    return {"exit_code": 0, "output": json.dumps(body), "result": {"count": len(matches)}}
+    body = {
+        "matches": matches,
+        "truncated": truncated,
+        "timed_out": time.monotonic() > deadline,
+    }
+    return {
+        "exit_code": 0,
+        "output": json.dumps(body),
+        "result": {"count": len(matches)},
+    }
 
 
 OPERATIONS = {"app.errors": scan, "logs.search": search}

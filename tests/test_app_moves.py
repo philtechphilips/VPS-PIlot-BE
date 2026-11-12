@@ -172,4 +172,3 @@ def test_a_failed_deploy_puts_everything_back(client, admin_headers, db: Session
     assert row.server_id == src
     assert apps.env_values(row)["DATABASE_URL"] == original
     assert moves.active_for(db, app["id"]) is None
-
