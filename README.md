@@ -1,14 +1,54 @@
-# VPSPilot API
+# VPSPilot
 
-The control-plane API for VPSPilot: a self-hosted dashboard for managing VPS
-servers, deployments and databases. Built on FastAPI, SQLAlchemy 2.0 and
-PostgreSQL.
+A self-hosted control plane for the servers you already own. Enroll Ubuntu and
+Debian servers, deploy apps from Git or a container image, run databases with
+backups that are restored to prove they work, and get told when something
+breaks, all from one dashboard you host yourself. No SSH sessions, no
+per-seat bills.
 
-This first slice is **authentication**: a single owner account, password
-login with an emailed 6-digit code (two-factor), rotating refresh sessions and
-password resets. Email is sent through [Resend](https://resend.com).
+VPSPilot is open source under the [Apache License 2.0](LICENSE).
 
-## Quick start
+- **Servers**: live metrics, OS updates, disk and security checks, logs.
+- **Deployments**: Docker, Compose or systemd apps from GitHub or any Git URL,
+  with builds detected for Node.js, Bun, Python, Go, Rust and static sites,
+  preview deployments, rollbacks, cron jobs and moves between servers.
+- **Databases**: PostgreSQL, MySQL, MariaDB and Redis, with a query editor,
+  users and encrypted backups to S3, R2, Backblaze or Google Drive.
+- **Domains**: HTTPS through Caddy, password and IP protection, public status
+  pages.
+- **Monitoring**: alert rules, uptime checks, app errors, a weekly report, and
+  alerts by email, Slack, Telegram or webhook.
+- **Security**: vulnerable dependencies and OS packages of every app,
+  committed secrets, runtimes near end of life, account and team alerts.
+
+## Install
+
+On a fresh Ubuntu 22.04+ or Debian 12+ server with a DNS record pointing at it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/philtechphilips/VPS-PIlot-BE/main/deploy/install.sh \
+  | sudo bash -s -- --domain pilot.example.com --email you@example.com
+```
+
+Then open `https://pilot.example.com/setup` to create the owner account. See
+[deploy/README.md](deploy/README.md) for requirements, upgrades and backups of
+the control plane itself.
+
+## How it fits together
+
+| Part | Where |
+|---|---|
+| API (FastAPI, PostgreSQL): the control plane | `app/` in this repository |
+| Agent: runs on every managed server, with a root helper for a fixed set of operations | `agent/` in this repository |
+| Installer and the `vpspilot` command | `deploy/` in this repository |
+| Dashboard (Next.js): login, setup and the dashboard every install serves | [Vps-Pilot](https://github.com/philtechphilips/Vps-Pilot) |
+
+Agents connect out to the control plane over HTTPS and poll it for jobs, so
+the agent needs no inbound port on your servers.
+
+## Development
+
+### Quick start
 
 ```bash
 uv sync                      # install Python and dependencies
@@ -20,7 +60,7 @@ uv run poe dev               # http://localhost:8000, docs at /docs
 The Next.js dashboard proxies `/api/*` to this server, so open
 <http://localhost:3000/setup> to create the owner account.
 
-### `.env`
+#### `.env`
 
 | Variable | Notes |
 |---|---|
@@ -121,3 +161,13 @@ Run `uv run poe` to list them.
 | `uv run poe migrate` | Apply migrations |
 | `uv run poe makemigration "message"` | Generate a migration from model changes |
 | `uv run poe createadmin <email>` | Create an admin, or promote a user |
+
+## Contributing
+
+Issues and pull requests are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).
+Report security issues privately as described in [SECURITY.md](SECURITY.md).
+
+## License
+
+[Apache License 2.0](LICENSE). Contributions are accepted under the same
+license.
