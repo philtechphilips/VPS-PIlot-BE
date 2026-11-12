@@ -101,7 +101,9 @@ def test_groups_are_stored_listed_and_ignored(client, admin_headers, db: Session
         f"{APPS}/{app['id']}/errors/{groups[0]['id']}/ignore", headers=admin_headers
     )
     reply = client.post("/agent/v1/heartbeat", json={"facts": {}}, headers=agent).json()
-    assert reply["error_ignore"] == {"shop": [f"fp:{'a' * 16}"]}
+    assert reply["error_ignore"] == {
+        "shop": ["access forbidden by rule", f"fp:{'a' * 16}"]
+    }
 
 
 def test_log_search_fans_out_per_server(client, admin_headers, db: Session):

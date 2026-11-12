@@ -434,3 +434,74 @@ def set_ignored(
     finding.ignored_by = label[:64] if ignored else None
     db.commit()
     return finding
+
+
+# ---------------------------------------------------------------------------
+# Scanner noise (App logging errors)
+# ---------------------------------------------------------------------------
+
+# Error lines that internet-wide scanners cause, left out of the App logging
+# errors count only while the app is safe from what they probe for.
+# - No packages: the line itself says the probe was refused. nginx logs
+#   "access forbidden by rule" when a deny rule blocked the request (/.git,
+#   /.env...); an exposed file would be served without any error line.
+# - Packages: the live deployment must use one of them and its last check
+#   against OSV.dev must have found no advisory for any, even an ignored one.
+#   Next.js logs "Server Reference ID did not match" for the fake Server
+#   Action ids of React2Shell scans (CVE-2025-55182).
+SCANNER_NOISE: tuple[tuple[str, frozenset[str]], ...] = (
+    ("access forbidden by rule", frozenset()),
+    (
+        "server reference id did not match",
+        frozenset({"next", "react-server-dom-webpack", "react-server-dom-turbopack"}),
+    ),
+)
+
+
+def scanner_noise(db: Session, apps: list[Application]) -> dict[str, list[str]]:
+    """Per app id, the scanner error lines it's safe from (see SCANNER_NOISE)."""
+    ids = [a.id for a in apps]
+    scans: dict[str, AppScan] = {}
+    if ids and lookups_enabled(db):
+        scans = {
+            s.application_id: s
+            for s in db.scalars(select(AppScan).where(AppScan.application_id.in_(ids)))
+        }
+    live = {
+        d.id: d
+        for d in db.scalars(
+            select(Deployment).where(
+                Deployment.id.in_(
+                    [a.current_deployment_id for a in apps if a.id in scans]
+                )
+            )
+        )
+    }
+    advised: dict[str, set[str]] = {}
+    for app_id, package in db.execute(
+        select(AppFinding.application_id, AppFinding.package).where(
+            AppFinding.application_id.in_(list(scans)), AppFinding.kind == "dependency"
+        )
+    ):
+        advised.setdefault(app_id, set()).add(package)
+    out: dict[str, list[str]] = {}
+    for app in apps:
+        scan, deployment = scans.get(app.id), live.get(app.current_deployment_id or "")
+        used: set[str] = set()
+        # checked_at is cleared by every new scan, so it covers these packages;
+        # the scan must also be of what's live, not of the version before.
+        if (
+            scan is not None
+            and scan.checked_at is not None
+            and deployment is not None
+            and deployment.finished_at is not None
+            and _aware(scan.scanned_at) >= _aware(deployment.finished_at)
+        ):
+            used = {p[1] for p in scan.packages or [] if len(p) == 3 and p[0] == "npm"}
+        out[app.id] = [
+            text
+            for text, packages in SCANNER_NOISE
+            if not packages
+            or (packages & used and not packages & advised.get(app.id, set()))
+        ]
+    return out

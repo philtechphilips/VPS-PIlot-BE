@@ -3,15 +3,19 @@
 import json
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 from vpspilot_agent import apperrors, runner
 
 from app.apps import service as apps
-from app.apps.models import AppErrorMetric
+from app.apps.models import AppErrorMetric, Application, Deployment
+from app.core.security import new_id
 from app.monitoring import service as monitoring
 from app.monitoring.models import Alert, AlertRule
 from app.notifications.models import Notification
+from app.platform import service as platform
+from app.security import service as security
+from app.security.models import AppFinding, AppScan
 from tests.test_apps import APPS, git_app
 from tests.test_servers import enrolled_agent
 
@@ -220,4 +224,113 @@ def test_ignore_lists_reach_the_agent(client, admin_headers):
         headers=admin_headers,
     )
     reply = client.post("/agent/v1/heartbeat", json={"facts": {}}, headers=agent).json()
-    assert reply["error_ignore"] == {"shop": ["ECONNRESET", "DeprecationWarning"]}
+    assert reply["error_ignore"] == {
+        "shop": ["ECONNRESET", "DeprecationWarning", "access forbidden by rule"]
+    }
+
+
+NEXT_PROBE = "server reference id did not match"
+
+
+def _live(db: Session, app_id: str, server_id: str, scanned_after: bool = True):
+    """The app's live deployment, and a checked scan of it using Next.js."""
+    finished = datetime.now(UTC) - timedelta(minutes=10)
+    deployment = Deployment(
+        id=new_id(),
+        application_id=app_id,
+        server_id=server_id,
+        status="succeeded",
+        trigger="manual",
+        created_by="test",
+        finished_at=finished,
+    )
+    db.add(deployment)
+    db.get(Application, app_id).current_deployment_id = deployment.id
+    scanned = finished + timedelta(minutes=1 if scanned_after else -1)
+    scan = AppScan(
+        application_id=app_id,
+        scanned_at=scanned,
+        checked_at=scanned,
+        packages=[["npm", "next", "16.4.3"], ["npm", "react", "19.2.4"]],
+    )
+    db.add(scan)
+    db.commit()
+    return scan
+
+
+def _advisory(db: Session, app_id: str, package: str, ignored: bool = False) -> None:
+    now = datetime.now(UTC)
+    db.add(
+        AppFinding(
+            id=new_id(),
+            application_id=app_id,
+            kind="dependency",
+            key=f"GHSA-x:{package}",
+            severity="medium",
+            title="An advisory",
+            ecosystem="npm",
+            package=package,
+            first_seen_at=now,
+            ignored_at=now if ignored else None,
+        )
+    )
+    db.commit()
+
+
+def test_scanner_noise_is_left_out_only_while_the_app_is_safe(
+    client, admin_headers, db: Session
+):
+    server_id, agent = enrolled_agent(client, admin_headers)
+    app = client.post(APPS, json=git_app(server_id), headers=admin_headers).json()
+    app_id = app["id"]
+
+    def ignored() -> list[str]:
+        reply = client.post("/agent/v1/heartbeat", json={"facts": {}}, headers=agent)
+        return reply.json()["error_ignore"]["shop"]
+
+    # nginx's refusal is the proof itself; Next.js needs a checked scan.
+    assert ignored() == ["access forbidden by rule"]
+    scan = _live(db, app_id, server_id)
+    assert NEXT_PROBE in ignored()
+
+    # Not checked against OSV.dev yet (a new scan clears checked_at).
+    scan.checked_at = None
+    db.commit()
+    assert NEXT_PROBE not in ignored()
+    scan.checked_at = scan.scanned_at
+    db.commit()
+
+    # Lookups off: checks still run (secrets) but say nothing about advisories.
+    platform.get(db).vuln_checks = False
+    db.commit()
+    assert NEXT_PROBE not in ignored()
+    platform.get(db).vuln_checks = True
+    db.commit()
+
+    # Any advisory for Next.js, even one the user ignored, keeps it counted.
+    _advisory(db, app_id, "next", ignored=True)
+    assert ignored() == ["access forbidden by rule"]
+    db.execute(delete(AppFinding))
+    db.commit()
+    _advisory(db, app_id, "lodash")  # other packages don't matter here
+    assert NEXT_PROBE in ignored()
+
+
+def test_scanner_noise_needs_a_scan_of_the_live_version(
+    client, admin_headers, db: Session
+):
+    server_id, agent = enrolled_agent(client, admin_headers)
+    app = client.post(APPS, json=git_app(server_id), headers=admin_headers).json()
+    app_id = app["id"]
+    row = db.get(Application, app_id)
+
+    # Scanned before the live deployment (a rollback to an older Next.js).
+    _live(db, app_id, server_id, scanned_after=False)
+    assert security.scanner_noise(db, [row])[app_id] == ["access forbidden by rule"]
+
+    # Scanned after it, but the app doesn't use Next.js.
+    scan = db.get(AppScan, app_id)
+    scan.scanned_at = scan.checked_at = datetime.now(UTC)
+    scan.packages = [["npm", "express", "5.1.0"]]
+    db.commit()
+    assert security.scanner_noise(db, [row])[app_id] == ["access forbidden by rule"]

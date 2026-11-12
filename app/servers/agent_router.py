@@ -30,6 +30,7 @@ from app.jobs.schemas import (
     JobEventsRequest,
 )
 from app.platform import service as platform
+from app.security import service as security
 from app.servers import service
 from app.servers.models import Server
 from app.servers.schemas import (
@@ -123,10 +124,12 @@ def heartbeat(body: HeartbeatRequest, agent: Agent, db: DbSession):
         db.scalars(select(Application).where(Application.server_id == agent.id))
     )
     groups = apps.ignored_fingerprints(db, [a.id for a in apps_here])
+    # Before the groups: the agent keeps the first 200 per app.
+    noise = security.scanner_noise(db, apps_here)
     ignore = {
-        a.name: [*(a.error_ignore or []), *groups.get(a.id, [])]
+        a.name: [*(a.error_ignore or []), *noise.get(a.id, []), *groups.get(a.id, [])]
         for a in apps_here
-        if a.error_ignore or a.id in groups
+        if a.error_ignore or noise.get(a.id) or a.id in groups
     }
     return _config(jobs.pending_count(db, agent), ignore)
 
