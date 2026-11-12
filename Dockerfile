@@ -1,5 +1,5 @@
 # VPSPilot API (control plane). Built by deploy/compose.yaml.
-FROM python:3.12-slim
+FROM python:3.15-slim
 # Debian security fixes released since the base image was published.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
     && rm -rf /var/lib/apt/lists/*
